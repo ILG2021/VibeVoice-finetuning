@@ -87,7 +87,7 @@ python -m src.finetune_vibevoice_lora \
 
 --voice_prompts_column_name voice_prompts \
 
---output_dir outputTrain3 \
+--output_dir ckpts \
 
 --per_device_train_batch_size 8 \
 
@@ -103,7 +103,9 @@ python -m src.finetune_vibevoice_lora \
 
 --eval_steps 100 \
 
---report_to wandb \
+--save_total_limit 5 \
+
+--report_to tensorboard \
 
 --remove_unused_columns False \
 
@@ -145,7 +147,7 @@ python -m src.finetune_vibevoice_lora \
 ```
 python -m src.finetune_vibevoice_lora \
 
---model_name_or_path aoi-ot/VibeVoice-Large \
+--model_name_or_path aoi-ot/VibeVoice-1.5B \
 
 --processor_name_or_path src/vibevoice/processor \
 
@@ -157,9 +159,11 @@ python -m src.finetune_vibevoice_lora \
 
 --output_dir outputTrain3 \
 
---per_device_train_batch_size 8 \
+--per_device_train_batch_size 4 \
 
---gradient_accumulation_steps 16 \
+--gradient_accumulation_steps 32 \
+
+--gradient_checkpointing True \
 
 --learning_rate 2.5e-5 \
 
@@ -178,8 +182,6 @@ python -m src.finetune_vibevoice_lora \
 --do_train \
 
 --gradient_clipping \
-
---gradient_checkpointing False \
 
 --ddpm_batch_mul 4 \
 
