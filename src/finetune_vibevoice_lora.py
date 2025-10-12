@@ -13,7 +13,7 @@ from transformers import (
     HfArgumentParser,
     Trainer,
     set_seed,
-    TrainerCallback,
+    TrainerCallback, BitsAndBytesConfig,
 )
 from transformers import TrainingArguments as HfTrainingArguments
 
@@ -487,9 +487,13 @@ def main() -> None:
         dtype = torch.bfloat16
     elif getattr(training_args, "fp16", False):
         dtype = torch.float16
+    quantization_config = BitsAndBytesConfig(
+        load_in_8bit=True
+    )
     model = VibeVoiceForConditionalGeneration.from_pretrained(
         model_args.model_name_or_path,
         torch_dtype=dtype,
+        quantization_config=quantization_config
     )
     _patch_acoustic_encode_for_legacy_indexing(model, logger)
     processor.semantic_tokenizer = getattr(model.model, "semantic_tokenizer", None)
