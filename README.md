@@ -159,11 +159,9 @@ python -m src.finetune_vibevoice_lora \
 
 --output_dir outputTrain3 \
 
---per_device_train_batch_size 4 \
+--per_device_train_batch_size 8 \
 
---gradient_accumulation_steps 32 \
-
---gradient_checkpointing True \
+--gradient_accumulation_steps 16 \
 
 --learning_rate 2.5e-5 \
 
@@ -171,9 +169,11 @@ python -m src.finetune_vibevoice_lora \
 
 --logging_steps 10 \
 
---save_steps 100 \
+--save_steps 200 \
 
---report_to wandb \
+--save_total_limit 5 \
+
+--report_to tensorboard \
 
 --remove_unused_columns False \
 
