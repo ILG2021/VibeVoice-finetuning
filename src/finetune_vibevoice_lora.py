@@ -143,7 +143,7 @@ class ModelArguments:
         metadata={"help": "Comma-separated list of target module names in the LLM blocks"},
     )
     lora_wrap_diffusion_head: bool = field(default=False, metadata={"help": "Wrap diffusion head with PEFT LoRA"})
-    train_diffusion_head: bool = field(default=False, metadata={"help": "Train diffusion prediction head (full fine-tune)"})
+    train_full_diffusion_head: bool = field(default=False, metadata={"help": "Train diffusion prediction head (full fine-tune)"})
     train_connectors: bool = field(default=False, metadata={"help": "Train acoustic/semantic connectors (full fine-tune)"})
     layers_to_freeze: Optional[str] = field(
         default=None, 
@@ -680,7 +680,7 @@ def main() -> None:
             logger.warning(f"Could not LoRA-wrap diffusion head: {e}")
 
     # Train full diffusion head (optional)
-    if getattr(model_args, "train_diffusion_head", False) and hasattr(model.model, "prediction_head"):
+    if getattr(model_args, "train_full_diffusion_head", False) and hasattr(model.model, "prediction_head"):
         for p in model.model.prediction_head.parameters():
             p.requires_grad = True
         logger.info("  ✓ Enabled full diffusion head training")

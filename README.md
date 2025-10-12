@@ -121,7 +121,7 @@ python -m src.finetune_vibevoice_lora \
 
 --diffusion_loss_weight 1.4 \
 
---train_diffusion_head True \
+--lora_wrap_diffusion_head True `
 
 --ce_loss_weight 0.04 \
 
@@ -187,7 +187,7 @@ python -m src.finetune_vibevoice_lora \
 
 --diffusion_loss_weight 1.4 \
 
---train_diffusion_head True \
+--lora_wrap_diffusion_head True \
 
 --ce_loss_weight 0.04 \
 
@@ -205,33 +205,59 @@ python -m src.finetune_vibevoice_lora \
 For Windows
 ```
 python -m src.finetune_vibevoice_lora `
+
 --model_name_or_path aoi-ot/VibeVoice-1.5B `
+
 --processor_name_or_path src/vibevoice/processor `
+
 --train_jsonl prompts.jsonl `
+
 --text_column_name text `
+
 --audio_column_name audio `
+
 --output_dir ckpts `
+
 --per_device_train_batch_size 8 `
+
 --gradient_accumulation_steps 16 `
+
 --learning_rate 2.5e-5 `
+
 --num_train_epochs 5 `
+
 --logging_steps 10 `
+
 --save_steps 200 `
+
 --save_total_limit 5 `
+
 --report_to tensorboard `
+
 --remove_unused_columns False `
+
 --bf16 True `
+
 --do_train `
+
 --gradient_clipping `
+
 --ddpm_batch_mul 4 `
+
 --diffusion_loss_weight 1.4 `
---train_diffusion_head True `
+
 --lora_wrap_diffusion_head True `
+
 --ce_loss_weight 0.04 `
+
 --voice_prompt_drop_rate 0.2 `
+
 --lora_target_modules q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj `
+
 --lr_scheduler_type cosine `
+
 --warmup_ratio 0.03 `
+
 --max_grad_norm 0.8
 ```
 
@@ -358,7 +384,7 @@ Controls the base model, its configuration, and which components are trained.
 
   
 
-*  `--train_diffusion_head`
+*  `--train_full_diffusion_head`
 
 *  **What it does:** A boolean flag to enable **full fine-tuning** of the diffusion prediction head. When enabled, all parameters of the diffusion head become trainable.
 
@@ -366,7 +392,7 @@ Controls the base model, its configuration, and which components are trained.
 
 ```bash
 
---train_diffusion_head True
+--train_full_diffusion_head True
 
 ```
 
@@ -432,7 +458,7 @@ Controls the base model, its configuration, and which components are trained.
 
 *  `--lora_wrap_diffusion_head`
 
-*  **What it does:** An **alternative** to `--train_diffusion_head`. If `True`, it applies LoRA adapters to the diffusion head instead of fine-tuning it fully, enabling more parameter-efficient training of the head. Must only use `--train_diffusion_head` or `--lora_wrap_diffusion_head`
+*  **What it does:** An **alternative** to `--train_full_diffusion_head`. If `True`, it applies LoRA adapters to the diffusion head instead of fine-tuning it fully, enabling more parameter-efficient training of the head. Must only use `--train_full_diffusion_head` or `--lora_wrap_diffusion_head`
 
 *  **Default:**  `False`
 
