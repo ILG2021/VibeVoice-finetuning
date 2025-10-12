@@ -11,12 +11,13 @@ import argparse
 import csv
 import json
 import os
+from pathlib import Path
 from typing import Optional
 
 
 def convert_ljspeech_to_jsonl(
     metadata_path: str,
-    output_path: str,
+    output_path: Optional[str] = "prompts.jsonl",
     audio_dir: Optional[str] = None,
     audio_extension: str = ".wav",
     speaker: str = '',
@@ -41,7 +42,6 @@ def convert_ljspeech_to_jsonl(
         os.makedirs(output_dir)
     
     processed_count = 0
-    
     with open(metadata_path, 'r', encoding='utf-8') as infile:
         with open(output_path, 'w', encoding='utf-8') as outfile:
             
@@ -62,14 +62,15 @@ def convert_ljspeech_to_jsonl(
                     audio_file = os.path.join(audio_dir, filename + audio_extension)
                 else:
                     # 使用相对路径
-                    audio_file = filename + audio_extension
-                
+                    parent = Path(metadata_path).parent  # Get parent directory
+                    audio_file = (parent / 'wavs' / filename).as_posix()
+
                 # 创建JSONL条目
                 jsonl_entry = {
                     "audio": audio_file,
                     "text": text,
                 }
-                
+
                 # 写入JSONL文件
                 outfile.write(json.dumps(jsonl_entry, ensure_ascii=False) + '\n')
                 processed_count += 1
@@ -124,31 +125,27 @@ def validate_jsonl_file(jsonl_path: str, audio_dir: Optional[str] = None) -> Non
 def main():
     parser = argparse.ArgumentParser(description='Convert LJSpeech format to JSONL')
     parser.add_argument('metadata', help='Path to metadata.csv file')
-    parser.add_argument('output', help='Output JSONL file path')
+    parser.add_argument('--output', help='Output JSONL file path')
     parser.add_argument('--audio-dir', help='Audio files directory')
     parser.add_argument('--audio-ext', default='.wav', help='Audio file extension (default: .wav)')
     parser.add_argument('--speaker', default='Speaker 0', help='Speaker for text (default: Speaker 0)')
     parser.add_argument('--validate', action='store_true', help='Validate the output JSONL file')
     
     args = parser.parse_args()
-    
-    try:
-        # 转换文件
-        convert_ljspeech_to_jsonl(
-            metadata_path=args.metadata,
-            output_path=args.output,
-            audio_dir=args.audio_dir,
-            audio_extension=args.audio_ext,
-            speaker=args.speaker,
-        )
-        
-        # 如果需要，验证输出文件
-        if args.validate:
-            validate_jsonl_file(args.output, args.audio_dir)
-            
-    except Exception as e:
-        print(f"Error: {e}")
-        return 1
+
+    # 转换文件
+    convert_ljspeech_to_jsonl(
+        metadata_path=args.metadata,
+        output_path=args.output,
+        audio_dir=args.audio_dir,
+        audio_extension=args.audio_ext,
+        speaker=args.speaker,
+    )
+
+    # 如果需要，验证输出文件
+    if args.validate:
+        validate_jsonl_file(args.output, args.audio_dir)
+
     
     return 0
 

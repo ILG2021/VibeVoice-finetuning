@@ -2,6 +2,7 @@
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -493,7 +494,7 @@ def main() -> None:
     model = VibeVoiceForConditionalGeneration.from_pretrained(
         model_args.model_name_or_path,
         torch_dtype=dtype,
-        quantization_config=quantization_config
+        # quantization_config=quantization_config
     )
     _patch_acoustic_encode_for_legacy_indexing(model, logger)
     processor.semantic_tokenizer = getattr(model.model, "semantic_tokenizer", None)
