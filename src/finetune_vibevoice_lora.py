@@ -330,7 +330,6 @@ def load_lora_checkpoint(model, checkpoint_path: str, model_args: ModelArguments
             logger.info("  ✓ Loaded Diffusion Head LoRA adapters")
         except Exception as e:
             logger.warning(f"  ⚠️ Failed to load head LoRA: {e}, trying full weights...")
-
     # 降级: 尝试加载 full weights
     if not isinstance(getattr(model.model, "prediction_head", None), PeftModel):
         for full_path in [head_full_path, head_full_path_alt]:
