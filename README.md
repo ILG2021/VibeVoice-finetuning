@@ -209,10 +209,10 @@ python -m src.finetune_vibevoice_lora `
 --text_column_name text `
 --audio_column_name audio `
 --output_dir ckpts `
---per_device_train_batch_size 8 `
---gradient_accumulation_steps 16 `
+--per_device_train_batch_size 4 `
+--gradient_accumulation_steps 32 `
 --learning_rate 2.5e-5 `
---num_train_epochs 5 `
+--num_train_epochs 10 `
 --logging_steps 10 `
 --save_steps 200 `
 --save_total_limit 5 `
@@ -226,7 +226,7 @@ python -m src.finetune_vibevoice_lora `
 --gradient_checkpointing True `
 --train_full_diffusion_head True `
 --ce_loss_weight 0.04 `
---voice_prompt_drop_rate 0.2 `
+--voice_prompt_drop_rate 1.0 `
 --lr_scheduler_type cosine `
 --warmup_ratio 0.03 `
 --max_grad_norm 0.8

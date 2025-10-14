@@ -24,7 +24,6 @@ def get_audio_duration(audio_path):
 
 def convert_ljspeech_to_jsonl(
     metadata_path: str,
-    output_path: Optional[str] = "prompts.jsonl",
     audio_dir: Optional[str] = None,
     audio_extension: str = ".wav",
     speaker: str = '',
@@ -42,7 +41,7 @@ def convert_ljspeech_to_jsonl(
     # 检查输入文件是否存在
     if not os.path.exists(metadata_path):
         raise FileNotFoundError(f"Metadata file not found: {metadata_path}")
-    
+    output_path = "prompts.jsonl"
     # 创建输出目录
     output_dir = os.path.dirname(output_path)
     if output_dir and not os.path.exists(output_dir):
@@ -146,7 +145,6 @@ def main():
     # 转换文件
     convert_ljspeech_to_jsonl(
         metadata_path=args.metadata,
-        output_path=args.output,
         audio_dir=args.audio_dir,
         audio_extension=args.audio_ext,
         speaker=args.speaker,
