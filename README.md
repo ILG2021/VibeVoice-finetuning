@@ -115,13 +115,13 @@ python -m src.finetune_vibevoice_lora \
 
 --gradient_clipping \
 
---gradient_checkpointing False \
+--gradient_checkpointing True \
 
 --ddpm_batch_mul 4 \
 
 --diffusion_loss_weight 1.4 \
 
---lora_wrap_diffusion_head True `
+--train_full_diffusion_head True `
 
 --ce_loss_weight 0.04 \
 
@@ -171,6 +171,8 @@ python -m src.finetune_vibevoice_lora \
 
 --save_total_limit 5 \
 
+--gradient_checkpointing True \
+
 --report_to tensorboard \
 
 --remove_unused_columns False \
@@ -185,7 +187,7 @@ python -m src.finetune_vibevoice_lora \
 
 --diffusion_loss_weight 1.4 \
 
---lora_wrap_diffusion_head True \
+--train_full_diffusion_head True \
 
 --ce_loss_weight 0.04 \
 
@@ -221,7 +223,8 @@ python -m src.finetune_vibevoice_lora `
 --gradient_clipping `
 --ddpm_batch_mul 4 `
 --diffusion_loss_weight 1.4 `
---lora_wrap_diffusion_head True `
+--gradient_checkpointing True `
+--train_full_diffusion_head True `
 --ce_loss_weight 0.04 `
 --voice_prompt_drop_rate 0.2 `
 --lr_scheduler_type cosine `
