@@ -13,7 +13,14 @@ import json
 import os
 from pathlib import Path
 from typing import Optional
+import torchaudio
 
+
+# Load metadata
+def get_audio_duration(audio_path):
+    """Calculate the duration mono of an audio file."""
+    audio, sample_rate = torchaudio.load(audio_path)
+    return audio.shape[1] / sample_rate
 
 def convert_ljspeech_to_jsonl(
     metadata_path: str,
@@ -65,6 +72,9 @@ def convert_ljspeech_to_jsonl(
                     parent = Path(metadata_path).parent  # Get parent directory
                     audio_file = (parent / 'wavs' / filename).as_posix()
 
+                duration = get_audio_duration(audio_file)
+                if duration < 2 or duration > 30:
+                    continue
                 # 创建JSONL条目
                 jsonl_entry = {
                     "audio": audio_file,
