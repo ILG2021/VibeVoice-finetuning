@@ -2,7 +2,6 @@
 import logging
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -14,7 +13,7 @@ from transformers import (
     HfArgumentParser,
     Trainer,
     set_seed,
-    TrainerCallback, BitsAndBytesConfig,
+    TrainerCallback,
 )
 from transformers import TrainingArguments as HfTrainingArguments
 
@@ -34,17 +33,18 @@ import copy
 import torch
 from transformers import TrainerCallback
 
+
 class EmaCallback(TrainerCallback):
-    def __init__(self, attr_path="model.prediction_head", decay=0.999, device="cpu", resume_shadow=None):
+    def __init__(self, attr_path="model.prediction_head", decay=0.999, device="cpu"):
         """
-        Args:
-            resume_shadow: 从 checkpoint 恢复的 EMA shadow dict
+        attr_path: where the head lives under self.model (Trainer wraps your VibeVoiceForConditionalGeneration)
+        decay:     EMA decay (0.999 ~ stable, 0.9999 ~ very smooth, slower to adapt)
         """
         self.attr_path = attr_path
         self.decay = float(decay)
         self.device = torch.device(device)
-        self.shadow = resume_shadow  # 允许外部注入
-        self._orig = None
+        self.shadow = None
+        self._orig = None  # store non-EMA weights when we swap
 
     def _get_module(self, model):
         # Resolve dotted path like "model.prediction_head"
@@ -55,42 +55,24 @@ class EmaCallback(TrainerCallback):
 
     def on_train_begin(self, args, state, control, model=None, **kwargs):
         head = self._get_module(model)
-
-        if self.shadow is None:
-            # 初始化新的 shadow
-            self.shadow = {k: p.detach().to(self.device).clone()
-                           for k, p in head.state_dict().items()}
-            logger.info("EMA: Initialized new shadow weights")
-        else:
-            # Resume: 验证 keys 匹配
-            current_keys = set(head.state_dict().keys())
-            shadow_keys = set(self.shadow.keys())
-            if current_keys != shadow_keys:
-                logger.warning(f"EMA: Key mismatch! current={len(current_keys)}, shadow={len(shadow_keys)}")
-                # 可以选择重新初始化或只保留匹配的 keys
-                self.shadow = {k: v for k, v in self.shadow.items() if k in current_keys}
-            logger.info("EMA: Resumed from checkpoint shadow weights")
+        self.shadow = {k: p.detach().to(self.device).clone()
+                       for k, p in head.state_dict().items()}
 
     def on_step_end(self, args, state, control, model=None, **kwargs):
-        if self.shadow is None:
-            return
+        if self.shadow is None: return
         head = self._get_module(model)
         with torch.no_grad():
             for k, v in head.state_dict().items():
-                if k in self.shadow:
-                    self.shadow[k].mul_(self.decay).add_(v.detach().to(self.device), alpha=(1.0 - self.decay))
+                self.shadow[k].mul_(self.decay).add_(v.detach().to(self.device), alpha=(1.0 - self.decay))
 
     # ---- Swap helpers ----
     def _swap_in_ema(self, model):
-        if self.shadow is None:
-            return
         head = self._get_module(model)
-        self._orig = {k: v.cpu().clone() for k, v in head.state_dict().items()}
+        self._orig = copy.deepcopy(head.state_dict())
         head.load_state_dict(self.shadow, strict=False)
 
     def _swap_back(self, model):
-        if self._orig is None:
-            return
+        if self._orig is None: return
         head = self._get_module(model)
         head.load_state_dict(self._orig, strict=False)
         self._orig = None
@@ -105,16 +87,6 @@ class EmaCallback(TrainerCallback):
     def on_save(self, args, state, control, model=None, **kwargs):
         # temporarily swap to EMA, let Trainer save, then swap back
         self._swap_in_ema(model)
-        # 保存 EMA shadow
-        try:
-            if self.shadow:
-                output_dir = getattr(args, "output_dir", None)
-                if output_dir:
-                    lora_out = os.path.join(output_dir, "lora")
-                    os.makedirs(lora_out, exist_ok=True)
-                    torch.save(self.shadow, os.path.join(lora_out, "ema_shadow.pt"))
-        except Exception as e:
-            logger.warning(f"Failed to save EMA shadow: {e}")
 
     def on_save_end(self, args, state, control, model=None, **kwargs):
         self._swap_back(model)
@@ -143,16 +115,20 @@ class ModelArguments:
         metadata={"help": "Comma-separated list of target module names in the LLM blocks"},
     )
     lora_wrap_diffusion_head: bool = field(default=False, metadata={"help": "Wrap diffusion head with PEFT LoRA"})
-    train_full_diffusion_head: bool = field(default=False, metadata={"help": "Train diffusion prediction head (full fine-tune)"})
-    train_connectors: bool = field(default=False, metadata={"help": "Train acoustic/semantic connectors (full fine-tune)"})
+    train_diffusion_head: bool = field(default=False,
+                                       metadata={"help": "Train diffusion prediction head (full fine-tune)"})
+    train_connectors: bool = field(default=False,
+                                   metadata={"help": "Train acoustic/semantic connectors (full fine-tune)"})
     layers_to_freeze: Optional[str] = field(
-        default=None, 
+        default=None,
         metadata={"help": "Comma-separated indices of diffusion head layers to freeze (e.g., '0,1,5,7,8')."}
     )
 
+
 @dataclass
 class DataArguments:
-    dataset_name: Optional[str] = field(default=None, metadata={"help": "HF dataset name or 'json' with --train_jsonl for local files"})
+    dataset_name: Optional[str] = field(default=None, metadata={
+        "help": "HF dataset name or 'json' with --train_jsonl for local files"})
     dataset_config_name: Optional[str] = field(default=None)
     train_split_name: str = field(default="train")
     eval_split_name: Optional[str] = field(default="validation")
@@ -162,12 +138,15 @@ class DataArguments:
     eval_split_size: float = field(default=0.0)
     ignore_verifications: bool = field(default=False)
     max_length: Optional[int] = field(default=None)
-    train_jsonl: Optional[str] = field(default=None, metadata={"help": "Path to local train JSONL with {text, audio, [voice_prompts]}"})
+    train_jsonl: Optional[str] = field(default=None, metadata={
+        "help": "Path to local train JSONL with {text, audio, [voice_prompts]}"})
     validation_jsonl: Optional[str] = field(default=None, metadata={"help": "Optional path to local validation JSONL"})
     voice_prompt_drop_rate: float = field(
         default=0.0,
-        metadata={"help": "Probability to drop conditioning voice prompt during training (0.0 keep always, 1.0 drop always)."},
+        metadata={
+            "help": "Probability to drop conditioning voice prompt during training (0.0 keep always, 1.0 drop always)."},
     )
+
 
 @dataclass
 class CustomTrainingArguments(HfTrainingArguments):
@@ -180,12 +159,14 @@ class CustomTrainingArguments(HfTrainingArguments):
     debug_ce_every_n_steps: int = field(default=200)
     gradient_clipping: bool = field(
         default=False,
-        metadata={"help": "Enable gradient clipping using max_grad_norm (set via --max_grad_norm, default 1.0). When False, disables clipping by forcing max_grad_norm=0.0."},
+        metadata={
+            "help": "Enable gradient clipping using max_grad_norm (set via --max_grad_norm, default 1.0). When False, disables clipping by forcing max_grad_norm=0.0."},
     )
     debug_save: bool = field(
         default=False,
         metadata={"help": "If set, saves model components BEFORE training starts, into output_dir/debug_initial."},
     )
+
 
 def build_lora_config(args: ModelArguments) -> LoraConfig:
     target_modules = [s.strip() for s in args.lora_target_modules.split(",") if s.strip()]
@@ -198,8 +179,9 @@ def build_lora_config(args: ModelArguments) -> LoraConfig:
         target_modules=target_modules,
     )
 
+
 def build_head_lora_config(args: ModelArguments) -> LoraConfig:
-    target_modules = ["noisy_images_proj","cond_proj","gate_proj","up_proj","down_proj","linear"]
+    target_modules = ["noisy_images_proj", "cond_proj", "gate_proj", "up_proj", "down_proj", "linear"]
     return LoraConfig(
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
@@ -209,9 +191,13 @@ def build_head_lora_config(args: ModelArguments) -> LoraConfig:
         target_modules=target_modules,
     )
 
-def mask_for_ce(labels: torch.Tensor, attention_mask: torch.Tensor, acoustic_input_mask: torch.Tensor, pad_id: int = -100) -> torch.Tensor:
+
+def mask_for_ce(labels: torch.Tensor, attention_mask: torch.Tensor, acoustic_input_mask: torch.Tensor,
+                pad_id: int = -100) -> torch.Tensor:
     shifted = labels[:, 1:].contiguous()
-    base_mask = attention_mask[:, 1:].contiguous().eq(1) if (attention_mask is not None and attention_mask.numel() > 0) else torch.ones_like(shifted, dtype=torch.bool)
+    base_mask = attention_mask[:, 1:].contiguous().eq(1) if (
+                attention_mask is not None and attention_mask.numel() > 0) else torch.ones_like(shifted,
+                                                                                                dtype=torch.bool)
     label_is_acoustic = acoustic_input_mask[:, 1:].contiguous()
     final_mask = base_mask & (~label_is_acoustic)
     out = shifted.clone()
@@ -219,174 +205,6 @@ def mask_for_ce(labels: torch.Tensor, attention_mask: torch.Tensor, acoustic_inp
     return out
 
 
-def get_last_checkpoint(output_dir: str) -> Optional[str]:
-    """
-    自动检测 output_dir 中最新的 checkpoint
-
-    Returns:
-        最新 checkpoint 的完整路径,如果没有则返回 None
-    """
-    if not os.path.isdir(output_dir):
-        return None
-
-    checkpoints = []
-    for item in os.listdir(output_dir):
-        if not item.startswith("checkpoint-"):
-            continue
-
-        full_path = os.path.join(output_dir, item)
-        if not os.path.isdir(full_path):
-            continue
-
-        # 验证是否为有效的 LoRA checkpoint (至少有 lora/ 或 trainer_state.json)
-        has_lora = os.path.isdir(os.path.join(full_path, "lora"))
-        has_trainer_state = os.path.isfile(os.path.join(full_path, "trainer_state.json"))
-
-        if has_lora or has_trainer_state:
-            checkpoints.append(full_path)
-
-    if not checkpoints:
-        return None
-
-    # 按步数排序
-    def extract_step(ckpt_path):
-        try:
-            return int(os.path.basename(ckpt_path).split("-")[-1])
-        except:
-            return -1
-
-    checkpoints.sort(key=extract_step)
-    last_checkpoint = checkpoints[-1]
-
-    logger.info(f"🔍 Found {len(checkpoints)} valid checkpoints in {output_dir}")
-    logger.info(f"📌 Latest checkpoint: {os.path.basename(last_checkpoint)} (step {extract_step(last_checkpoint)})")
-
-    return last_checkpoint
-
-
-def load_lora_checkpoint(model, checkpoint_path: str, model_args: ModelArguments):
-    """
-    从 checkpoint 加载 LoRA adapters 和其他组件
-
-    Args:
-        model: VibeVoiceForConditionalGeneration 实例
-        checkpoint_path: checkpoint 目录路径
-        model_args: 模型参数
-    """
-    from peft import PeftModel
-
-    lora_dir = os.path.join(checkpoint_path, "lora")
-    if not os.path.exists(lora_dir):
-        logger.warning(f"⚠️ No 'lora' directory found in {checkpoint_path}")
-        return None
-
-    logger.info(f"🔄 Loading LoRA checkpoint from: {lora_dir}")
-
-    # 1. 加载 LLM LoRA adapters
-    lm_adapter_config = os.path.join(lora_dir, "adapter_config.json")
-    if os.path.exists(lm_adapter_config):
-        try:
-            model.model.language_model = PeftModel.from_pretrained(
-                model.model.language_model,
-                lora_dir,
-                is_trainable=True,
-            )
-            logger.info("  ✓ Loaded LLM LoRA adapters")
-        except Exception as e:
-            logger.error(f"  ✗ Failed to load LLM LoRA: {e}")
-            raise
-    else:
-        logger.info("  ℹ️ No LLM LoRA adapters found (adapter_config.json missing)")
-
-    # 2. 加载 Diffusion Head (优先 LoRA,降级到 full weights)
-    head_lora_dir = os.path.join(lora_dir, "diffusion_head")
-    head_lora_config = os.path.join(head_lora_dir, "adapter_config.json")
-    head_full_path = os.path.join(lora_dir, "diffusion_head_full.bin")
-    head_full_path_alt = os.path.join(head_lora_dir, "diffusion_head_full.bin")
-
-    if os.path.exists(head_lora_config) and model_args.lora_wrap_diffusion_head:
-        try:
-            # LoRA 包装的 head 需要 shim
-            class _HeadForwardShim(nn.Module):
-                def __init__(self, base):
-                    super().__init__()
-                    self.base = base
-
-                def forward(self, *args, **kwargs):
-                    if len(args) >= 3:
-                        return self.base(args[0], args[1], args[2])
-                    return self.base(
-                        kwargs.get("noisy_images"),
-                        kwargs.get("timesteps"),
-                        kwargs.get("condition")
-                    )
-
-            shim = _HeadForwardShim(model.model.prediction_head)
-            model.model.prediction_head = PeftModel.from_pretrained(
-                shim,
-                head_lora_dir,
-                is_trainable=True,
-            )
-            logger.info("  ✓ Loaded Diffusion Head LoRA adapters")
-        except Exception as e:
-            logger.warning(f"  ⚠️ Failed to load head LoRA: {e}, trying full weights...")
-    # 降级: 尝试加载 full weights
-    if not isinstance(getattr(model.model, "prediction_head", None), PeftModel):
-        for full_path in [head_full_path, head_full_path_alt]:
-            if os.path.exists(full_path):
-                try:
-                    state_dict = torch.load(full_path, map_location="cpu")
-
-                    # 处理 LoRA wrapped 情况 (unwrap)
-                    if hasattr(model.model.prediction_head, "base"):
-                        model.model.prediction_head.base.load_state_dict(state_dict, strict=False)
-                    else:
-                        model.model.prediction_head.load_state_dict(state_dict, strict=False)
-
-                    logger.info(f"  ✓ Loaded Diffusion Head full weights from {os.path.basename(full_path)}")
-                    break
-                except Exception as e:
-                    logger.warning(f"  ⚠️ Failed to load {full_path}: {e}")
-
-    # 3. 加载 Acoustic Connector
-    ac_path = os.path.join(lora_dir, "acoustic_connector", "pytorch_model.bin")
-    if os.path.exists(ac_path):
-        try:
-            state_dict = torch.load(ac_path, map_location="cpu")
-            model.model.acoustic_connector.load_state_dict(state_dict)
-            logger.info("  ✓ Loaded acoustic_connector")
-        except Exception as e:
-            logger.warning(f"  ⚠️ Failed to load acoustic_connector: {e}")
-    else:
-        logger.info("  ℹ️ No acoustic_connector checkpoint found")
-
-    # 4. 加载 Semantic Connector
-    se_path = os.path.join(lora_dir, "semantic_connector", "pytorch_model.bin")
-    if os.path.exists(se_path):
-        try:
-            state_dict = torch.load(se_path, map_location="cpu")
-            model.model.semantic_connector.load_state_dict(state_dict)
-            logger.info("  ✓ Loaded semantic_connector")
-        except Exception as e:
-            logger.warning(f"  ⚠️ Failed to load semantic_connector: {e}")
-    else:
-        logger.info("  ℹ️ No semantic_connector checkpoint found")
-
-    # 5. 返回 EMA shadow (如果存在)
-    ema_path = os.path.join(lora_dir, "ema_shadow.pt")
-    ema_shadow = None
-    if os.path.exists(ema_path):
-        try:
-            ema_shadow = torch.load(ema_path, map_location="cpu")
-            logger.info("  ✓ Found EMA shadow weights")
-        except Exception as e:
-            logger.warning(f"  ⚠️ Failed to load EMA shadow: {e}")
-
-    return ema_shadow
-
-# 这段代码是一个动态修补函数，用于确保 acoustic_tokenizer.encode() 方法的返回值符合 [[...]] 格式，以支持遗留代码的兼容性。
-# 它通过检查返回值的类型（列表、字典、对象、Tensor 等）并进行格式转换，实现了健壮的适配逻辑。代码设计考虑了多种情况，
-# 并通过日志记录提供了调试支持，适用于模型迁移或兼容性调整的场景。
 def _patch_acoustic_encode_for_legacy_indexing(model_obj, logger_):
     try:
         acoustic = getattr(getattr(model_obj, "model", model_obj), "acoustic_tokenizer", None)
@@ -394,6 +212,7 @@ def _patch_acoustic_encode_for_legacy_indexing(model_obj, logger_):
             logger_.warning("No acoustic_tokenizer.encode() found to patch.")
             return
         base_encode = acoustic.encode
+
         def encode_wrapped(*args, **kwargs):
             out = base_encode(*args, **kwargs)
             try:
@@ -416,10 +235,12 @@ def _patch_acoustic_encode_for_legacy_indexing(model_obj, logger_):
             except Exception:
                 pass
             return [[out]]
+
         acoustic.encode = encode_wrapped
         logger_.info("Patched acoustic_tokenizer.encode() to return [[...]] for legacy indexing.")
     except Exception as e:
         logger_.warning(f"Failed to patch acoustic_tokenizer.encode(): {e}")
+
 
 def main() -> None:
     parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
@@ -433,37 +254,14 @@ def main() -> None:
     logger.info("Training/evaluation parameters %s", training_args)
     set_seed(training_args.seed)
 
-    # ============ 自动检测最新 checkpoint ============
-    last_checkpoint = None
-
-    if training_args.resume_from_checkpoint:
-        # 用户显式指定
-        if os.path.isdir(training_args.resume_from_checkpoint):
-            last_checkpoint = training_args.resume_from_checkpoint
-            logger.info(f"✅ Using user-specified checkpoint: {last_checkpoint}")
-        else:
-            raise ValueError(f"--resume_from_checkpoint path does not exist: {training_args.resume_from_checkpoint}")
-
-    elif os.path.isdir(training_args.output_dir) and training_args.do_train:
-        # 自动检测
-        detected_checkpoint = get_last_checkpoint(training_args.output_dir)
-        if detected_checkpoint:
-            last_checkpoint = detected_checkpoint
-            logger.info(f"🔄 Auto-detected checkpoint for resuming")
-        else:
-            logger.info("ℹ️ No checkpoint found, starting fresh training")
-
-    # 更新 training_args
-    if last_checkpoint:
-        training_args.resume_from_checkpoint = last_checkpoint
-
     # Configure gradient clipping
     if not getattr(training_args, "gradient_clipping", False):
         if hasattr(training_args, "max_grad_norm"):
             training_args.max_grad_norm = 0.0
             logger.info("Gradient clipping disabled (set max_grad_norm=0.0). Use --gradient_clipping to enable.")
     else:
-        if (not hasattr(training_args, "max_grad_norm")) or training_args.max_grad_norm is None or training_args.max_grad_norm <= 0:
+        if (not hasattr(training_args,
+                        "max_grad_norm")) or training_args.max_grad_norm is None or training_args.max_grad_norm <= 0:
             training_args.max_grad_norm = 1.0
         logger.info(f"Gradient clipping enabled: max_grad_norm={training_args.max_grad_norm}")
 
@@ -487,13 +285,9 @@ def main() -> None:
         dtype = torch.bfloat16
     elif getattr(training_args, "fp16", False):
         dtype = torch.float16
-    quantization_config = BitsAndBytesConfig(
-        load_in_8bit=True
-    )
     model = VibeVoiceForConditionalGeneration.from_pretrained(
         model_args.model_name_or_path,
         torch_dtype=dtype,
-        # quantization_config=quantization_config
     )
     _patch_acoustic_encode_for_legacy_indexing(model, logger)
     processor.semantic_tokenizer = getattr(model.model, "semantic_tokenizer", None)
@@ -515,7 +309,8 @@ def main() -> None:
             tie_cfg = getattr(getattr(model.config, "decoder_config", model.config), "tie_word_embeddings", None)
         except Exception:
             tie_cfg = getattr(model.config, "tie_word_embeddings", None)
-        logger.info(f"LM head diagnostics -> shared_params={shared_ptr}, values_equal={values_equal}, tie_word_embeddings={tie_cfg}")
+        logger.info(
+            f"LM head diagnostics -> shared_params={shared_ptr}, values_equal={values_equal}, tie_word_embeddings={tie_cfg}")
         if out_w is not None:
             logger.info(f"LM head requires_grad before freeze: {bool(out_w.requires_grad)}")
     except Exception as e:
@@ -563,7 +358,8 @@ def main() -> None:
                         decoded_str = tok.convert_ids_to_tokens(val)
                     except Exception:
                         decoded_str = "<decode_failed>"
-            logger.info(f"Special token check -> {name}={val}, decoded='{decoded_str}', exists={exists}, in_vocab_range={in_range}, emb_vs_head_row_equal={equal_row}")
+            logger.info(
+                f"Special token check -> {name}={val}, decoded='{decoded_str}', exists={exists}, in_vocab_range={in_range}, emb_vs_head_row_equal={equal_row}")
     except Exception as e:
         logger.warning(f"Special token ID/row validation failed: {e}")
 
@@ -582,7 +378,8 @@ def main() -> None:
             logits = model.lm_head(outputs.last_hidden_state)
             shift_logits = logits[:, :-1, :].contiguous()
             shift_labels = simple_ids[:, 1:].contiguous()
-            ce_loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1), reduction='mean')
+            ce_loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1),
+                                      reduction='mean')
             logger.info(f"Simple text CE loss: {ce_loss.item():.4f}")
     except Exception as e:
         logger.warning(f"Tokenizer diagnostics failed: {e}")
@@ -599,69 +396,24 @@ def main() -> None:
         for p in model.model.semantic_tokenizer.parameters():
             p.requires_grad = False
 
-    # ============ Resume or Fresh Training ============
-    ema_shadow = None
-
-    if last_checkpoint:
-        # 从 checkpoint 恢复
-        logger.info("=" * 60)
-        logger.info("RESUMING FROM CHECKPOINT")
-        logger.info("=" * 60)
-
-        # 加载 LoRA checkpoint (会修改 model)
-        ema_shadow = load_lora_checkpoint(model, last_checkpoint, model_args)
-
-        logger.info("=" * 60)
-
+    # LoRA wrap LLM (optional)
+    lora_cfg = build_lora_config(model_args)
+    tm_lower = [s.strip().lower() for s in model_args.lora_target_modules.split(",") if s.strip()]
+    skip_lm_lora = (len(tm_lower) == 0) or all(t in ("none", "off", "disable", "disabled") for t in tm_lower)
+    if not skip_lm_lora:
+        model.model.language_model = get_peft_model(model.model.language_model, lora_cfg)
     else:
-        # 从头训练: 应用 LoRA wrapping
-        logger.info("=" * 60)
-        logger.info("STARTING FRESH TRAINING (wrapping with LoRA)")
-        logger.info("=" * 60)
+        logger.info("Skipping LLM LoRA wrapping (lora_target_modules indicates none).")
 
-        lora_cfg = build_lora_config(model_args)
-        tm_lower = [s.strip().lower() for s in model_args.lora_target_modules.split(",") if s.strip()]
-        skip_lm_lora = (len(tm_lower) == 0) or all(t in ("none", "off", "disable", "disabled") for t in tm_lower)
-        if not skip_lm_lora:
-            model.model.language_model = get_peft_model(model.model.language_model, lora_cfg)
-            logger.info("  ✓ Wrapped LLM with LoRA")
-        else:
-            logger.info("  ℹ️ Skipping LLM LoRA (target_modules indicates none)")
+    try:
+        model.tie_weights()
+    except Exception:
+        pass
 
-        try:
-            model.tie_weights()
-        except Exception:
-            pass
-
-        # Diffusion head LoRA wrapping (optional)
-        if getattr(model_args, "lora_wrap_diffusion_head", False) and hasattr(model.model, "prediction_head"):
-            class _HeadForwardShim(nn.Module):
-                def __init__(self, base: nn.Module):
-                    super().__init__()
-                    self.base = base
-
-                def forward(self, *args, **kwargs):
-                    if len(args) >= 3:
-                        noisy_images, timesteps, condition = args[:3]
-                    else:
-                        noisy_images = kwargs.get("noisy_images")
-                        timesteps = kwargs.get("timesteps")
-                        condition = kwargs.get("condition")
-                    return self.base(noisy_images, timesteps, condition)
-
-            try:
-                shim = _HeadForwardShim(model.model.prediction_head)
-                model.model.prediction_head = get_peft_model(shim, build_head_lora_config(model_args))
-                logger.info("  ✓ Wrapped Diffusion Head with LoRA")
-            except Exception as e:
-                logger.warning(f"  ⚠️ Could not LoRA-wrap diffusion head: {e}")
-
-    # ============ 统一的 requires_grad 设置 ============
-    # 先冻结所有
+    # Freeze all then enable trainable subsets
     for _, p in model.named_parameters():
         p.requires_grad = False
 
-    # 启用 LoRA 参数
     try:
         for n, p in model.model.language_model.named_parameters():
             if "lora_A" in n or "lora_B" in n:
@@ -669,9 +421,24 @@ def main() -> None:
     except Exception:
         logger.warning("Could not re-enable LoRA params on language_model.")
 
-    # 启用 diffusion head LoRA 参数
-    if hasattr(model.model, "prediction_head"):
+    # Diffusion head LoRA wrapping (optional)
+    if getattr(model_args, "lora_wrap_diffusion_head", False) and hasattr(model.model, "prediction_head"):
+        class _HeadForwardShim(nn.Module):
+            def __init__(self, base: nn.Module):
+                super().__init__(); self.base = base
+
+            def forward(self, *args, **kwargs):
+                if len(args) >= 3:
+                    noisy_images, timesteps, condition = args[:3]
+                else:
+                    noisy_images = kwargs.get("noisy_images")
+                    timesteps = kwargs.get("timesteps")
+                    condition = kwargs.get("condition")
+                return self.base(noisy_images, timesteps, condition)
+
         try:
+            shim = _HeadForwardShim(model.model.prediction_head)
+            model.model.prediction_head = get_peft_model(shim, build_head_lora_config(model_args))
             for n, p in model.model.prediction_head.named_parameters():
                 if "lora_A" in n or "lora_B" in n:
                     p.requires_grad = True
@@ -679,10 +446,9 @@ def main() -> None:
             logger.warning(f"Could not LoRA-wrap diffusion head: {e}")
 
     # Train full diffusion head (optional)
-    if getattr(model_args, "train_full_diffusion_head", False) and hasattr(model.model, "prediction_head"):
+    if getattr(model_args, "train_diffusion_head", False) and hasattr(model.model, "prediction_head"):
         for p in model.model.prediction_head.parameters():
             p.requires_grad = True
-        logger.info("  ✓ Enabled full diffusion head training")
 
     # Freeze diffusion head layers (optional)
     if model_args.layers_to_freeze is not None and hasattr(model.model, "prediction_head"):
@@ -694,11 +460,12 @@ def main() -> None:
                 if i in indices_to_freeze:
                     param.requires_grad = False
                     frozen_count += 1
-            logger.info(f"  ✓ Froze {frozen_count} diffusion head parameter groups")
+                    logger.info(f"Froze layer [{i}]: {name}")
+            logger.info(f"Successfully froze {frozen_count} parameter groups in the diffusion head.")
         except Exception as e:
             logger.error(f"Could not parse --layers_to_freeze: {e}")
             raise
-    
+
     # Connectors
     if getattr(model_args, "train_connectors", False):
         if hasattr(model.model, "acoustic_connector"):
@@ -707,7 +474,6 @@ def main() -> None:
         if hasattr(model.model, "semantic_connector"):
             for p in model.model.semantic_connector.parameters():
                 p.requires_grad = True
-        logger.info("  ✓ Enabled connector training")
     else:
         if hasattr(model.model, "acoustic_connector"):
             for p in model.model.acoustic_connector.parameters():
@@ -730,13 +496,19 @@ def main() -> None:
     # Diagnostics
     def _sum_params(named_iter):
         return sum(p.numel() for _, p in named_iter if p.requires_grad)
+
     try:
-        lm_lora = _sum_params(model.model.language_model.named_parameters()) if hasattr(model.model, "language_model") else 0
-        pred_head_train = _sum_params(model.model.prediction_head.named_parameters()) if hasattr(model.model, "prediction_head") else 0
-        ac_conn_train = _sum_params(model.model.acoustic_connector.named_parameters()) if hasattr(model.model, "acoustic_connector") else 0
-        se_conn_train = _sum_params(model.model.semantic_connector.named_parameters()) if hasattr(model.model, "semantic_connector") else 0
+        lm_lora = _sum_params(model.model.language_model.named_parameters()) if hasattr(model.model,
+                                                                                        "language_model") else 0
+        pred_head_train = _sum_params(model.model.prediction_head.named_parameters()) if hasattr(model.model,
+                                                                                                 "prediction_head") else 0
+        ac_conn_train = _sum_params(model.model.acoustic_connector.named_parameters()) if hasattr(model.model,
+                                                                                                  "acoustic_connector") else 0
+        se_conn_train = _sum_params(model.model.semantic_connector.named_parameters()) if hasattr(model.model,
+                                                                                                  "semantic_connector") else 0
         total_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.info(f"Trainable by block -> LLM-LoRA: {lm_lora:,} | diff_head: {pred_head_train:,} | ac_conn: {ac_conn_train:,} | se_conn: {se_conn_train:,}")
+        logger.info(
+            f"Trainable by block -> LLM-LoRA: {lm_lora:,} | diff_head: {pred_head_train:,} | ac_conn: {ac_conn_train:,} | se_conn: {se_conn_train:,}")
         logger.info("TOTAL trainable: %s", f"{total_trainable:,}")
     except Exception:
         pass
@@ -747,10 +519,12 @@ def main() -> None:
         data_files: Dict[str, str] = {"train": data_args.train_jsonl}
         if data_args.validation_jsonl is not None:
             data_files["validation"] = data_args.validation_jsonl
-        raw = load_dataset("json", data_files=data_files, verification_mode=verification_mode, cache_dir=model_args.cache_dir)
+        raw = load_dataset("json", data_files=data_files, verification_mode=verification_mode,
+                           cache_dir=model_args.cache_dir)
     else:
         if data_args.dataset_name is None:
-            raise ValueError("Provide --dataset_name (HF datasets) or use --train_jsonl/--validation_jsonl for local files.")
+            raise ValueError(
+                "Provide --dataset_name (HF datasets) or use --train_jsonl/--validation_jsonl for local files.")
         raw = load_dataset(
             data_args.dataset_name,
             data_args.dataset_config_name,
@@ -821,8 +595,10 @@ def main() -> None:
                 req_grad = sum(1 for n in self.lora_param_names if named[n].requires_grad)
                 num_A = sum(1 for n in self.lora_param_names if "lora_A" in n)
                 num_B = sum(1 for n in self.lora_param_names if "lora_B" in n)
-                zero_B = sum(1 for n in self.lora_param_names if ("lora_B" in n and float(named[n].data.norm().item()) == 0.0))
-                logger.info(f"LoRA debug: found {total} LoRA params (A={num_A}, B={num_B}); trainable={req_grad}. Initial lora_B_zero={zero_B}.")
+                zero_B = sum(
+                    1 for n in self.lora_param_names if ("lora_B" in n and float(named[n].data.norm().item()) == 0.0))
+                logger.info(
+                    f"LoRA debug: found {total} LoRA params (A={num_A}, B={num_B}); trainable={req_grad}. Initial lora_B_zero={zero_B}.")
                 if total == 0:
                     logger.warning("LoRA debug: No LoRA parameters found. Check lora_target_modules.")
                 if req_grad != total:
@@ -858,12 +634,14 @@ def main() -> None:
                     self.prev_param_norms[n] = curr
                 total_A = sum(1 for n in self.lora_param_names if "lora_A" in n)
                 total_B = sum(1 for n in self.lora_param_names if "lora_B" in n)
-                logger.info(f"LoRA debug step {step}: changed A {changed_A}/{total_A}, changed B {changed_B}/{total_B}, lora_B_zero_now={zero_B}.")
+                logger.info(
+                    f"LoRA debug step {step}: changed A {changed_A}/{total_A}, changed B {changed_B}/{total_B}, lora_B_zero_now={zero_B}.")
             except Exception as e:
                 logger.warning(f"LoRA debug (on_step_end) failed: {e}")
 
     class VibeVoiceTrainer(Trainer):
-        def compute_loss(self, model: VibeVoiceForConditionalGeneration, inputs: Dict[str, Any], return_outputs=False, num_items_in_batch: Optional[int] = None):
+        def compute_loss(self, model: VibeVoiceForConditionalGeneration, inputs: Dict[str, Any], return_outputs=False,
+                         num_items_in_batch: Optional[int] = None):
             labels = inputs.get("input_ids")
             attention_mask = inputs.get("attention_mask")
             acoustic_input_mask = inputs.get("acoustic_input_mask")
@@ -909,7 +687,8 @@ def main() -> None:
                 num_tok_total = int(acoustic_input_mask.sum().item()) if acoustic_input_mask is not None else 0
                 num_tok_loss = int(al_mask.sum().item()) if al_mask is not None else 0
                 num_lat_total = int(sp_masks.sum().item()) if sp_masks is not None else 0
-                num_lat_loss = int(((sp_loss_sel & sp_masks).sum().item())) if (sp_loss_sel is not None and sp_masks is not None) else 0
+                num_lat_loss = int(((sp_loss_sel & sp_masks).sum().item())) if (
+                            sp_loss_sel is not None and sp_masks is not None) else 0
                 self.log({
                     "debug/num_tok_total": float(num_tok_total),
                     "debug/num_tok_loss": float(num_tok_loss),
@@ -918,7 +697,8 @@ def main() -> None:
                 })
                 if sp_loss_sel is not None and sp_masks is not None and al_mask is not None:
                     if num_tok_loss != num_lat_loss:
-                        logger.warning(f"Loss selection mismatch: acoustic_loss_mask={num_tok_loss} vs speeches_loss_input={num_lat_loss}")
+                        logger.warning(
+                            f"Loss selection mismatch: acoustic_loss_mask={num_tok_loss} vs speeches_loss_input={num_lat_loss}")
             except Exception:
                 pass
 
@@ -936,7 +716,8 @@ def main() -> None:
                 logger.warning(f"Failed invoking CE debug: {e}")
 
             # Diffusion loss
-            diffusion_loss = outputs.diffusion_loss if outputs.diffusion_loss is not None else torch.tensor(0.0, device=ce_loss.device)
+            diffusion_loss = outputs.diffusion_loss if outputs.diffusion_loss is not None else torch.tensor(0.0,
+                                                                                                            device=ce_loss.device)
             total = training_args.ce_loss_weight * ce_loss + training_args.diffusion_loss_weight * diffusion_loss
 
             # Logs
@@ -944,7 +725,9 @@ def main() -> None:
                 prefix = "train" if model.training else "eval"
                 self.log({
                     f"{prefix}/ce_loss": ce_loss.detach().item(),
-                    f"{prefix}/diffusion_loss": diffusion_loss.detach().item() if isinstance(diffusion_loss, torch.Tensor) else float(diffusion_loss),
+                    f"{prefix}/diffusion_loss": diffusion_loss.detach().item() if isinstance(diffusion_loss,
+                                                                                             torch.Tensor) else float(
+                        diffusion_loss),
                 })
                 if hasattr(self, "optimizer") and self.optimizer is not None and len(self.optimizer.param_groups) > 0:
                     lr_val = self.optimizer.param_groups[0].get("lr", None)
@@ -955,7 +738,8 @@ def main() -> None:
 
             return (total, outputs) if return_outputs else total
 
-        def _debug_ce(self, shift_logits: torch.Tensor, ce_labels: torch.Tensor, attention_mask: Optional[torch.Tensor], acoustic_input_mask: Optional[torch.Tensor]):
+        def _debug_ce(self, shift_logits: torch.Tensor, ce_labels: torch.Tensor, attention_mask: Optional[torch.Tensor],
+                      acoustic_input_mask: Optional[torch.Tensor]):
             try:
                 if not getattr(training_args, "debug_ce_details", False):
                     return
@@ -986,31 +770,31 @@ def main() -> None:
                             per_ex_avgs.append(float(per_token_loss[b][vb].mean().item()))
                         else:
                             per_ex_avgs.append(float("nan"))
-                    logger.info(f"CE debug: tokens_in_loss={num_valid}, avg_loss={avg_loss:.4f}, per_example_avgs={[round(x,4) if x==x else None for x in per_ex_avgs]}")
+                    logger.info(
+                        f"CE debug: tokens_in_loss={num_valid}, avg_loss={avg_loss:.4f}, per_example_avgs={[round(x, 4) if x == x else None for x in per_ex_avgs]}")
             except Exception as e:
                 logger.warning(f"CE detailed debug failed: {e}")
 
         # --------- CRITICAL SAVE OVERRIDES: also dump FULL head/connectors for inference ---------
-  
 
         def _save(self, output_dir: Optional[str] = None, state_dict=None) -> None:
             try:
                 target_dir = output_dir or self.args.output_dir
                 lora_out = os.path.join(target_dir, "lora")
                 os.makedirs(lora_out, exist_ok=True)
-    
+
                 # --- LLM PEFT adapters (if LoRA-wrapped) ---
                 language_model = getattr(self.model.model, "language_model", None)
                 if hasattr(language_model, "save_pretrained"):
                     language_model.save_pretrained(lora_out)
-    
+
                 # --- Diffusion head PEFT adapters (if LoRA-wrapped) ---
                 pred_head = getattr(self.model.model, "prediction_head", None)
                 if hasattr(pred_head, "save_pretrained"):
                     ph_dir = os.path.join(lora_out, "diffusion_head")
                     os.makedirs(ph_dir, exist_ok=True)
                     pred_head.save_pretrained(ph_dir)
-    
+
                 # --- ALWAYS save FULL diffusion head state_dict for fallback ---
                 if pred_head is not None and hasattr(pred_head, "state_dict"):
                     sd = pred_head.state_dict()
@@ -1018,29 +802,28 @@ def main() -> None:
                     ph_dir = os.path.join(lora_out, "diffusion_head")
                     os.makedirs(ph_dir, exist_ok=True)
                     torch.save(sd, os.path.join(ph_dir, "diffusion_head_full.bin"))
-    
+
                 # --- Connectors (plain state_dicts) ---
                 ac = getattr(self.model.model, "acoustic_connector", None)
                 if ac is not None:
                     ac_dir = os.path.join(lora_out, "acoustic_connector")
                     os.makedirs(ac_dir, exist_ok=True)
                     torch.save(ac.state_dict(), os.path.join(ac_dir, "pytorch_model.bin"))
-    
+
                 se = getattr(self.model.model, "semantic_connector", None)
                 if se is not None:
                     se_dir = os.path.join(lora_out, "semantic_connector")
                     os.makedirs(se_dir, exist_ok=True)
                     torch.save(se.state_dict(), os.path.join(se_dir, "pytorch_model.bin"))
-    
+
             except Exception as e:
                 logger.warning(f"Failed to save LoRA assets: {e}")
-
 
     # ------------- Build the Trainer -------------
 
     # Resolve which adapters to apply in samples
 
-    ema_cb = EmaCallback(attr_path="model.prediction_head", decay=0.999, device="cpu", resume_shadow=ema_shadow)
+    ema_cb = EmaCallback(attr_path="model.prediction_head", decay=0.999, device="cpu")
 
     trainer = VibeVoiceTrainer(
         model=model,
@@ -1048,10 +831,8 @@ def main() -> None:
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
-        callbacks=[
-            ema_cb,
-            LoRADebugCallback(log_every_n_steps=(int(getattr(training_args, "logging_steps", 50) or 50)))
-        ],
+        callbacks=[ema_cb,
+                   LoRADebugCallback(log_every_n_steps=(int(getattr(training_args, "logging_steps", 50) or 50)))],
     )
 
     # Optional debug pre-training save
@@ -1109,26 +890,24 @@ def main() -> None:
         except Exception:
             logger.warning("Failed to enable gradient checkpointing on the model.")
 
-    # ============ 训练 ============
     if training_args.do_train:
         trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
 
-        # 最终保存 (保持原有代码)
         lora_out = os.path.join(training_args.output_dir, "lora")
         os.makedirs(lora_out, exist_ok=True)
-    
+
         # LLM PEFT (if any)
         lm = getattr(model.model, "language_model", None)
         if hasattr(lm, "save_pretrained"):
             lm.save_pretrained(lora_out)
-    
+
         # Diffusion head PEFT (if any)
         ph = getattr(model.model, "prediction_head", None)
         if hasattr(ph, "save_pretrained"):
             ph_dir = os.path.join(lora_out, "diffusion_head")
             os.makedirs(ph_dir, exist_ok=True)
             ph.save_pretrained(ph_dir)
-    
+
         # ALWAYS: full diffusion head state_dict fallback
         try:
             if ph is not None and hasattr(ph, "state_dict"):
@@ -1139,7 +918,7 @@ def main() -> None:
                 torch.save(sd, os.path.join(ph_dir, "diffusion_head_full.bin"))
         except Exception as e:
             logger.warning(f"Failed to save FULL diffusion head at end: {e}")
-    
+
         # Connectors (if trained)
         try:
             ac = getattr(model.model, "acoustic_connector", None)
@@ -1149,7 +928,7 @@ def main() -> None:
                 torch.save(ac.state_dict(), os.path.join(ac_dir, "pytorch_model.bin"))
         except Exception as e:
             logger.warning(f"Failed to save acoustic_connector: {e}")
-    
+
         try:
             se = getattr(model.model, "semantic_connector", None)
             if se is not None:
