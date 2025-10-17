@@ -1,4 +1,5 @@
 # train_vibevoice_lora.py
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -1153,7 +1154,26 @@ def main() -> None:
 
     # ============ 训练 ============
     if training_args.do_train:
-        trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
+        if training_args.resume_from_checkpoint:
+            checkpoint_path = training_args.resume_from_checkpoint
+            # 加载优化器状态
+            optimizer_state = torch.load(f"{checkpoint_path}/optimizer.pt")
+            trainer.optimizer.load_state_dict(optimizer_state)
+
+            # 加载学习率调度器状态
+            scheduler_state = torch.load(f"{checkpoint_path}/scheduler.pt")
+            trainer.lr_scheduler.load_state_dict(scheduler_state)
+
+            # 加载训练状态
+            with open(f"{checkpoint_path}/trainer_state.json", "r") as f:
+                trainer_state = json.load(f)
+            trainer.global_step = trainer_state["global_step"]
+            trainer.current_epoch = trainer_state["epoch"]
+
+            # 可选：加载随机数生成器状态（如果需要可重现性）
+            rng_state = torch.load(f"{checkpoint_path}/rng_state.pth")
+            torch.set_rng_state(rng_state)
+        trainer.train()
 
         # 最终保存 (保持原有代码)
         lora_out = os.path.join(training_args.output_dir, "lora")

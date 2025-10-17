@@ -108,13 +108,13 @@ python -m src.finetune_vibevoice_lora `
 --text_column_name text `
 --audio_column_name audio `
 --output_dir ckpts `
---per_device_train_batch_size 4 `
---gradient_accumulation_steps 32 `
---learning_rate 2.5e-5 `
---num_train_epochs 10 `
+--per_device_train_batch_size 8 `
+--gradient_accumulation_steps 16 `
+--learning_rate 5e-5 `
+--num_train_epochs 20 `
 --logging_steps 10 `
 --save_steps 200 `
---save_total_limit 5 `
+--save_total_limit 10 `
 --report_to tensorboard `
 --remove_unused_columns False `
 --bf16 True `
@@ -124,7 +124,7 @@ python -m src.finetune_vibevoice_lora `
 --diffusion_loss_weight 1.4 `
 --train_full_diffusion_head True `
 --ce_loss_weight 0.04 `
---voice_prompt_drop_rate 1.0 `
+--voice_prompt_drop_rate 0.2 `
 --lr_scheduler_type cosine `
 --warmup_ratio 0.03 `
 --max_grad_norm 0.8
