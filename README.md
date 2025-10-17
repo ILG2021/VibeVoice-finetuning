@@ -64,146 +64,45 @@ Requirements:
 
 - A 24khz audio dataset with audio files (target audio), text prompts (transcriptions) and optionally voice prompts (reference audio)
 
-  
-
-  
-  
-
-### Training with Hugging Face Dataset
-
-  
-```
-python -m src.finetune_vibevoice_lora \
-
---model_name_or_path aoi-ot/VibeVoice-Large \
-
---processor_name_or_path src/vibevoice/processor \
-
---dataset_name your/dataset \
-
---text_column_name text \
-
---audio_column_name audio \
-
---voice_prompts_column_name voice_prompts \
-
---output_dir ckpts \
-
---per_device_train_batch_size 8 \
-
---gradient_accumulation_steps 16 \
-
---learning_rate 2.5e-5 \
-
---num_train_epochs 5 \
-
---logging_steps 10 \
-
---save_steps 100 \
-
---eval_steps 100 \
-
---save_total_limit 5 \
-
---report_to tensorboard \
-
---remove_unused_columns False \
-
---bf16 True \
-
---do_train \
-
---gradient_clipping \
-
---gradient_checkpointing True \
-
---ddpm_batch_mul 4 \
-
---diffusion_loss_weight 1.4 \
-
---train_full_diffusion_head True `
-
---ce_loss_weight 0.04 \
-
---voice_prompt_drop_rate 0.2 \
-
---lr_scheduler_type cosine \
-
---warmup_ratio 0.03 \
-
---max_grad_norm 0.8
-```
-  
-
-----------
-
-  
 
 ### Training with Local JSONL Dataset
 
-  
+For Linux: 
+
 ```
 python -m src.finetune_vibevoice_lora \
-
 --model_name_or_path aoi-ot/VibeVoice-1.5B \
-
 --processor_name_or_path src/vibevoice/processor \
-
 --train_jsonl prompts.jsonl \
-
 --text_column_name text \
-
 --audio_column_name audio \
-
 --output_dir ckpts \
-
 --per_device_train_batch_size 8 \
-
 --gradient_accumulation_steps 16 \
-
 --learning_rate 2.5e-5 \
-
 --num_train_epochs 5 \
-
 --logging_steps 10 \
-
 --save_steps 200 \
-
 --save_total_limit 5 \
-
---gradient_checkpointing True \
-
 --report_to tensorboard \
-
 --remove_unused_columns False \
-
 --bf16 True \
-
 --do_train \
-
 --gradient_clipping \
-
 --ddpm_batch_mul 4 \
-
 --diffusion_loss_weight 1.4 \
-
 --train_full_diffusion_head True \
-
 --ce_loss_weight 0.04 \
-
 --voice_prompt_drop_rate 0.2 \
-
 --lr_scheduler_type cosine \
-
 --warmup_ratio 0.03 \
-
 --max_grad_norm 0.8
 ```
 
 For Windows
 ```
 python -m src.finetune_vibevoice_lora `
---model_name_or_path aoi-ot/VibeVoice-1.5B `
+--model_name_or_path vibevoice/VibeVoice-1.5B `
 --processor_name_or_path src/vibevoice/processor `
 --train_jsonl prompts.jsonl `
 --text_column_name text `
@@ -223,7 +122,6 @@ python -m src.finetune_vibevoice_lora `
 --gradient_clipping `
 --ddpm_batch_mul 4 `
 --diffusion_loss_weight 1.4 `
---gradient_checkpointing True `
 --train_full_diffusion_head True `
 --ce_loss_weight 0.04 `
 --voice_prompt_drop_rate 1.0 `

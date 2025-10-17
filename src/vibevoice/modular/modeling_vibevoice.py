@@ -418,6 +418,7 @@ class VibeVoiceForConditionalGeneration(VibeVoicePreTrainedModel):
         # This block is executed only if we are in a context that involves speech.
         if speech_tensors is not None and acoustic_loss_mask.sum().item() > 0:
             # Build conditioning mask from positions whose NEXT token is a speech latent (shift left by 1)
+            # 每个 speech token 条目都用自己前一个位置的 hidden_state作为条件。
             cond_mask = torch.zeros_like(acoustic_loss_mask, dtype=torch.bool)
             cond_mask[:, :-1] = acoustic_loss_mask[:, 1:]
             cond_mask[:, 0] = False
