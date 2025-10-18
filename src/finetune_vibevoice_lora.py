@@ -1180,7 +1180,7 @@ def main() -> None:
             trainer.current_epoch = trainer_state["epoch"]
 
             # 可选：加载随机数生成器状态（如果需要可重现性）
-            rng_state = torch.load(f"{checkpoint_path}/rng_state.pth")
+            rng_state = torch.load(f"{checkpoint_path}/rng_state.pth", weights_only=False)
             torch.set_rng_state(rng_state)
         trainer.train()
 
