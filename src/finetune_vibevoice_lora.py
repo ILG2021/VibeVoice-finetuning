@@ -3,6 +3,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
+from math import ceil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1156,7 +1157,14 @@ def main() -> None:
     if training_args.do_train:
         if training_args.resume_from_checkpoint:
             checkpoint_path = training_args.resume_from_checkpoint
-            trainer.create_optimizer()
+
+            dataset_size = len(train_dataset)
+            batch_size = training_args.per_device_train_batch_size * training_args.n_gpu * training_args.gradient_accumulation_steps
+            steps_per_epoch = ceil(dataset_size / batch_size)
+            num_training_steps = steps_per_epoch * training_args.num_train_epochs
+
+            # 初始化优化器和调度器
+            trainer.create_optimizer_and_scheduler(num_training_steps=num_training_steps)
             # 加载优化器状态
             optimizer_state = torch.load(f"{checkpoint_path}/optimizer.pt")
             trainer.optimizer.load_state_dict(optimizer_state)
