@@ -1156,6 +1156,7 @@ def main() -> None:
     if training_args.do_train:
         if training_args.resume_from_checkpoint:
             checkpoint_path = training_args.resume_from_checkpoint
+            trainer.create_optimizer()
             # 加载优化器状态
             optimizer_state = torch.load(f"{checkpoint_path}/optimizer.pt")
             trainer.optimizer.load_state_dict(optimizer_state)
