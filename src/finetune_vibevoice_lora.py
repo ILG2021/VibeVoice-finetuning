@@ -1157,57 +1157,22 @@ def main() -> None:
     if training_args.do_train:
         if training_args.resume_from_checkpoint:
             checkpoint_path = training_args.resume_from_checkpoint
+            logger.info(f"🔄 Resuming fine-tuning from checkpoint: {checkpoint_path}")
 
-            dataset_size = len(train_dataset)
-            batch_size = training_args.per_device_train_batch_size * training_args.n_gpu * training_args.gradient_accumulation_steps
-            steps_per_epoch = ceil(dataset_size / batch_size)
-            num_training_steps = steps_per_epoch * training_args.num_train_epochs
+            # 1. 加载 LoRA / Diffusion Head / Connectors 权重（已在上文 load_lora_checkpoint 执行）
 
-            # 初始化优化器和调度器
-            trainer.create_optimizer_and_scheduler(num_training_steps=num_training_steps)
-            # 加载优化器状态
-            optimizer_state = torch.load(f"{checkpoint_path}/optimizer.pt")
-            trainer.optimizer.load_state_dict(optimizer_state)
+            # 2. 恢复 Trainer 状态
+            trainer_state_path = os.path.join(checkpoint_path, "trainer_state.json")
+            if os.path.exists(trainer_state_path):
+                trainer.state = TrainerState.load_from_json(trainer_state_path)
+                logger.info(f"✅ Restored TrainerState (step={trainer.state.global_step}, epoch={trainer.state.epoch})")
+            else:
+                logger.warning("⚠️ No trainer_state.json found — training will start from step 0")
 
-            # 加载学习率调度器状态
-            scheduler_state = torch.load(f"{checkpoint_path}/scheduler.pt")
-            trainer.lr_scheduler.load_state_dict(scheduler_state)
-
-            # 加载训练状态
-            trainer.state = TrainerState.load_from_json(f"{checkpoint_path}/trainer_state.json")
-
-
-            # 可选：加载随机数生成器状态（如果需要可重现性）
-            rng_states = torch.load(f"{checkpoint_path}/rng_state.pth", weights_only=False)
-            # 1. Restore Python's random module state
-            if 'python' in rng_states:
-                import random
-                random.setstate(rng_states['python'])
-                print("Restored Python random state")
-
-            # 2. Restore NumPy's random state
-            if 'numpy' in rng_states:
-                import numpy as np
-                np.random.set_state(rng_states['numpy'])
-                print("Restored NumPy random state")
-
-            # 3. Restore PyTorch CPU RNG state
-            if 'cpu' in rng_states:
-                torch.set_rng_state(rng_states['cpu'])
-                print("Restored PyTorch CPU RNG state")
-
-            # 4. Restore PyTorch CUDA RNG state
-            if 'cuda' in rng_states and torch.cuda.is_available():
-                # If 'cuda' contains a single state (for all devices)
-                torch.cuda.set_rng_state(rng_states['cuda'])
-                print("Restored PyTorch CUDA RNG state (all devices)")
-                
-                # If per-device CUDA states are saved (e.g., {'cuda:0': state0, 'cuda:1': state1})
-                for key, state in rng_states.items():
-                    if key.startswith('cuda:'):
-                        device = key  # e.g., 'cuda:0'
-                        torch.cuda.set_rng_state(state, device=device)
-                        print(f"Restored PyTorch CUDA RNG state for {device}")
+            trainer.state.resume_from_checkpoint = checkpoint_path
+            logger.info(f"Trainer will resume from step {trainer.state.global_step}, epoch {trainer.state.epoch}")
+            trainer._load_optimizer_and_scheduler(checkpoint_path)
+            trainer._load_rng_state(checkpoint_path)
         trainer.train()
 
         # 最终保存 (保持原有代码)
