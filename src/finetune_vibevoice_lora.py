@@ -16,7 +16,7 @@ from transformers import (
     HfArgumentParser,
     Trainer,
     set_seed,
-    TrainerCallback, BitsAndBytesConfig,
+    TrainerCallback, BitsAndBytesConfig,TrainerState
 )
 from transformers import TrainingArguments as HfTrainingArguments
 
@@ -1174,14 +1174,40 @@ def main() -> None:
             trainer.lr_scheduler.load_state_dict(scheduler_state)
 
             # 加载训练状态
-            with open(f"{checkpoint_path}/trainer_state.json", "r") as f:
-                trainer_state = json.load(f)
-            trainer.global_step = trainer_state["global_step"]
-            trainer.current_epoch = trainer_state["epoch"]
+            trainer.state = TrainerState.load_from_json(f"{checkpoint_path}/trainer_state.json")
+
 
             # 可选：加载随机数生成器状态（如果需要可重现性）
-            rng_state = torch.load(f"{checkpoint_path}/rng_state.pth", weights_only=False)
-            torch.set_rng_state(rng_state)
+            rng_states = torch.load(f"{checkpoint_path}/rng_state.pth", weights_only=False)
+            # 1. Restore Python's random module state
+            if 'python' in rng_states:
+                import random
+                random.setstate(rng_states['python'])
+                print("Restored Python random state")
+
+            # 2. Restore NumPy's random state
+            if 'numpy' in rng_states:
+                import numpy as np
+                np.random.set_state(rng_states['numpy'])
+                print("Restored NumPy random state")
+
+            # 3. Restore PyTorch CPU RNG state
+            if 'cpu' in rng_states:
+                torch.set_rng_state(rng_states['cpu'])
+                print("Restored PyTorch CPU RNG state")
+
+            # 4. Restore PyTorch CUDA RNG state
+            if 'cuda' in rng_states and torch.cuda.is_available():
+                # If 'cuda' contains a single state (for all devices)
+                torch.cuda.set_rng_state(rng_states['cuda'])
+                print("Restored PyTorch CUDA RNG state (all devices)")
+                
+                # If per-device CUDA states are saved (e.g., {'cuda:0': state0, 'cuda:1': state1})
+                for key, state in rng_states.items():
+                    if key.startswith('cuda:'):
+                        device = key  # e.g., 'cuda:0'
+                        torch.cuda.set_rng_state(state, device=device)
+                        print(f"Restored PyTorch CUDA RNG state for {device}")
         trainer.train()
 
         # 最终保存 (保持原有代码)
