@@ -1,6 +1,7 @@
 # train_vibevoice_lora.py
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from math import ceil
@@ -998,6 +999,9 @@ def main() -> None:
                 pass
 
             return (total, outputs) if return_outputs else total
+        # 手动加载checkpoint
+        def _load_from_checkpoint(self, resume_from_checkpoint, model=None):
+            pass
 
         def _debug_ce(self, shift_logits: torch.Tensor, ce_labels: torch.Tensor, attention_mask: Optional[torch.Tensor],
                       acoustic_input_mask: Optional[torch.Tensor]):
@@ -1155,25 +1159,7 @@ def main() -> None:
 
     # ============ 训练 ============
     if training_args.do_train:
-        if training_args.resume_from_checkpoint:
-            checkpoint_path = training_args.resume_from_checkpoint
-            logger.info(f"🔄 Resuming fine-tuning from checkpoint: {checkpoint_path}")
-
-            # 1. 加载 LoRA / Diffusion Head / Connectors 权重（已在上文 load_lora_checkpoint 执行）
-
-            # 2. 恢复 Trainer 状态
-            trainer_state_path = os.path.join(checkpoint_path, "trainer_state.json")
-            if os.path.exists(trainer_state_path):
-                trainer.state = TrainerState.load_from_json(trainer_state_path)
-                logger.info(f"✅ Restored TrainerState (step={trainer.state.global_step}, epoch={trainer.state.epoch})")
-            else:
-                logger.warning("⚠️ No trainer_state.json found — training will start from step 0")
-
-            trainer.state.resume_from_checkpoint = checkpoint_path
-            logger.info(f"Trainer will resume from step {trainer.state.global_step}, epoch {trainer.state.epoch}")
-            trainer._load_optimizer_and_scheduler(checkpoint_path)
-            trainer._load_rng_state(checkpoint_path)
-        trainer.train()
+        trainer.train(training_args.resume_from_checkpoint)
 
         # 最终保存 (保持原有代码)
         lora_out = os.path.join(training_args.output_dir, "lora")
