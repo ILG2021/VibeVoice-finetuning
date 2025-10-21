@@ -1,40 +1,29 @@
 # train_vibevoice_lora.py
-import json
 import logging
-import math
 import os
 from dataclasses import dataclass, field
-from math import ceil
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from datasets import load_dataset, DatasetDict, VerificationMode
+from datasets import load_dataset, VerificationMode
+from peft import LoraConfig, get_peft_model, TaskType, PeftModel
 from torch_ema import ExponentialMovingAverage
-
 from transformers import (
     HfArgumentParser,
     Trainer,
-    set_seed,
-    TrainerCallback, BitsAndBytesConfig,TrainerState
+    set_seed
 )
 from transformers import TrainingArguments as HfTrainingArguments
 
-from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_training, PeftModel
-
-from vibevoice.modular.modeling_vibevoice import VibeVoiceForConditionalGeneration
-from vibevoice.modular.configuration_vibevoice import VibeVoiceConfig
-from vibevoice.processor.vibevoice_processor import VibeVoiceProcessor
-
 from data_vibevoice import VibeVoiceDataset, VibeVoiceCollator
+from vibevoice.modular.modeling_vibevoice import VibeVoiceForConditionalGeneration
+from vibevoice.processor.vibevoice_processor import VibeVoiceProcessor
 
 logger = logging.getLogger(__name__)
 
 # ================== SAMPLE CALLBACK UTILS ==================
 
-import copy
 import torch
 from transformers import TrainerCallback
 
