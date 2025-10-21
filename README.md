@@ -71,7 +71,7 @@ For Linux:
 
 ```
 python -m src.finetune_vibevoice_lora \
---model_name_or_path aoi-ot/VibeVoice-1.5B \
+--model_name_or_path aoi-ot/VibeVoice-large \
 --processor_name_or_path src/vibevoice/processor \
 --train_jsonl prompts.jsonl \
 --text_column_name text \
@@ -80,7 +80,7 @@ python -m src.finetune_vibevoice_lora \
 --per_device_train_batch_size 8 \
 --gradient_accumulation_steps 16 \
 --learning_rate 2.5e-5 \
---num_train_epochs 5 \
+--num_train_epochs 10 \
 --logging_steps 10 \
 --save_steps 200 \
 --save_total_limit 5 \
@@ -111,7 +111,7 @@ python -m src.finetune_vibevoice_lora `
 --per_device_train_batch_size 4 `
 --gradient_accumulation_steps 32 `
 --learning_rate 5e-5 `
---num_train_epochs 20 `
+--num_train_epochs 10 `
 --logging_steps 10 `
 --save_steps 200 `
 --save_total_limit 10 `
