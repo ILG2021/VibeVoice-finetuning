@@ -1,18 +1,22 @@
 # train_vibevoice_lora.py
+import json
 import logging
 import os
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+import huggingface_hub
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import load_dataset, VerificationMode
 from peft import LoraConfig, get_peft_model, TaskType, PeftModel
+from safetensors.torch import load_file
 from torch_ema import ExponentialMovingAverage
 from transformers import (
     HfArgumentParser,
     Trainer,
-    set_seed
+    set_seed, BitsAndBytesConfig, AutoModel
 )
 from transformers import TrainingArguments as HfTrainingArguments
 
@@ -114,6 +118,10 @@ class ModelArguments:
         default=None,
         metadata={"help": "Comma-separated indices of diffusion head layers to freeze (e.g., '0,1,5,7,8')."}
     )
+    quantization_mode: str = field(
+        default="none",
+        metadata={"help": "Quantization mode. Can be 'none', '8bit', or '4bit'."}
+    )
 
 
 @dataclass
@@ -187,8 +195,8 @@ def mask_for_ce(labels: torch.Tensor, attention_mask: torch.Tensor, acoustic_inp
                 pad_id: int = -100) -> torch.Tensor:
     shifted = labels[:, 1:].contiguous()
     base_mask = attention_mask[:, 1:].contiguous().eq(1) if (
-                attention_mask is not None and attention_mask.numel() > 0) else torch.ones_like(shifted,
-                                                                                                dtype=torch.bool)
+            attention_mask is not None and attention_mask.numel() > 0) else torch.ones_like(shifted,
+                                                                                            dtype=torch.bool)
     label_is_acoustic = acoustic_input_mask[:, 1:].contiguous()
     final_mask = base_mask & (~label_is_acoustic)
     out = shifted.clone()
@@ -390,6 +398,115 @@ def _patch_acoustic_encode_for_legacy_indexing(model_obj, logger_):
         logger_.warning(f"Failed to patch acoustic_tokenizer.encode(): {e}")
 
 
+def quantize_language_model_only(
+        model_path: str,
+        bnb_quantization_config: BitsAndBytesConfig,
+        torch_dtype: torch.dtype = torch.bfloat16
+) -> VibeVoiceForConditionalGeneration:
+    """
+    加载一个 VibeVoiceForConditionalGeneration 模型，并仅对其 language_model 子模块应用量化。
+
+    Args:
+        model_path (str):
+            包含完整 VibeVoice 模型权重和配置的目录路径。
+        bnb_quantization_config (BitsAndBytesConfig):
+            Hugging Face transformers 的 BitsAndBytesConfig 量化配置对象。
+        torch_dtype (torch.dtype, optional):
+            模型加载时使用的数据类型。默认为 torch.bfloat16。
+
+    Returns:
+        VibeVoiceForConditionalGeneration:
+            一个修改后的模型实例，其中 model.language_model 是量化的，
+            而其他部分保持原始精度。
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cpu":
+        raise RuntimeError("Quantization with bitsandbytes requires a CUDA-enabled GPU.")
+
+    print(f"--- Step 1: Loading full VibeVoice model from '{model_path}' in {torch_dtype} ---")
+    full_model = VibeVoiceForConditionalGeneration.from_pretrained(
+        model_path,
+        torch_dtype=torch_dtype,
+        low_cpu_mem_usage=True,  # 优化内存使用
+    ).to(device)
+    print("Full model loaded successfully.")
+
+    # --- 核心逻辑：加载并修正权重 ---
+    print("\n--- Step 2: Manually loading weights to prepare for partial quantization ---")
+
+    # 智能处理分片和非分片的 safetensors/bin 文件
+    full_state_dict = {}
+    index_path = os.path.join(model_path, 'model.safetensors.index.json')
+
+    if os.path.exists(index_path) and load_file is not None:
+        print("Found sharded safetensors index. Loading weights from shards...")
+        with open(index_path) as f:
+            index = json.load(f)
+
+        # 将所有分片加载到内存中
+        for _, filename in sorted(index['weight_map'].items()):
+            shard_path = os.path.join(model_path, filename)
+            # 使用 load_file 将张量加载到 CPU 以节省 VRAM
+            shard_state_dict = load_file(shard_path, device="cpu")
+            full_state_dict.update(shard_state_dict)
+            del shard_state_dict  # 及时释放分片内存
+    else:
+        # Fallback for single weight file (e.g., pytorch_model.bin or model.safetensors)
+        bin_path = os.path.join(model_path, 'pytorch_model.bin')
+        safe_path = os.path.join(model_path, 'model.safetensors')
+        weight_file = None
+        if os.path.exists(bin_path):
+            weight_file = bin_path
+            print("Found 'pytorch_model.bin'. Loading weights...")
+            full_state_dict = torch.load(weight_file, map_location="cpu")
+        elif os.path.exists(safe_path) and load_file is not None:
+            weight_file = safe_path
+            print("Found 'model.safetensors'. Loading weights...")
+            full_state_dict = load_file(weight_file, device="cpu")
+        else:
+            raise FileNotFoundError(f"Could not find weight files (sharded or single) in {model_path}")
+
+    # 从完整权重中提取并修正 language_model 的权重
+    language_model_state_dict = OrderedDict()
+    prefix = 'model.language_model.'
+    for key, value in full_state_dict.items():
+        if key.startswith(prefix):
+            # 去掉 'model.language_model.' 前缀以匹配标准 Qwen2Model
+            new_key = key[len(prefix):]
+            language_model_state_dict[new_key] = value
+
+    del full_state_dict  # 释放完整权重的内存
+    print(f"Successfully extracted and corrected {len(language_model_state_dict)} tensors for the language model.")
+
+    # --- 创建量化模型并加载权重 ---
+    print("\n--- Step 3: Creating quantized language model and loading corrected weights ---")
+
+    # 使用 from_config 创建一个空的量化模型结构，不加载任何权重
+    quantized_lm = AutoModel.from_pretrained(
+        pretrained_model_name_or_path=None,  # <-- 关键：不从任何地方下载
+        config=full_model.config.decoder_config,
+        quantization_config=bnb_quantization_config,
+        state_dict=language_model_state_dict,  # <-- 关键：直接提供权重
+        torch_dtype=torch_dtype,
+        low_cpu_mem_usage=False  # 因为我们提供了state_dict，所以不需要这个
+    )
+
+    del language_model_state_dict  # 再次释放内存
+    print("Quantized language_model created and weights loaded successfully.")
+
+    # --- 替换原始模型中的模块 ---
+    print("\n--- Step 4: Replacing the language_model in the full VibeVoice model ---")
+    # 为了节省显存，在替换前删除旧的 language_model
+    del full_model.model.language_model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    full_model.model.language_model = quantized_lm
+    print("Replacement complete. The model is now partially quantized.")
+
+    return full_model
+
+
 def main() -> None:
     parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
@@ -458,10 +575,30 @@ def main() -> None:
     elif getattr(training_args, "fp16", False):
         dtype = torch.float16
 
-    model = VibeVoiceForConditionalGeneration.from_pretrained(
-        model_args.model_name_or_path,
-        torch_dtype=dtype
-    )
+    if model_args.quantization_mode == "4bit":
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4"
+        )
+    elif model_args.quantization_mode == "8bit":
+        bnb_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+            bnb_8bit_compute_dtype=torch.bfloat16,
+        )
+    else:
+        bnb_config = None
+
+    if bnb_config:
+        model = quantize_language_model_only(huggingface_hub.snapshot_download(model_args.model_name_or_path),
+                                             bnb_config, torch_dtype=dtype)
+    else:
+        model = VibeVoiceForConditionalGeneration.from_pretrained(
+            model_args.model_name_or_path,
+            torch_dtype=dtype
+        )
+
     _patch_acoustic_encode_for_legacy_indexing(model, logger)
     processor.semantic_tokenizer = getattr(model.model, "semantic_tokenizer", None)
 
@@ -892,7 +1029,7 @@ def main() -> None:
                 num_tok_loss = int(al_mask.sum().item()) if al_mask is not None else 0
                 num_lat_total = int(sp_masks.sum().item()) if sp_masks is not None else 0
                 num_lat_loss = int(((sp_loss_sel & sp_masks).sum().item())) if (
-                            sp_loss_sel is not None and sp_masks is not None) else 0
+                        sp_loss_sel is not None and sp_masks is not None) else 0
                 self.log({
                     "debug/num_tok_total": float(num_tok_total),
                     "debug/num_tok_loss": float(num_tok_loss),
@@ -943,6 +1080,7 @@ def main() -> None:
                 pass
 
             return (total, outputs) if return_outputs else total
+
         # 手动加载checkpoint
         def _load_from_checkpoint(self, resume_from_checkpoint, model=None):
             pass
