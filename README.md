@@ -129,9 +129,7 @@ python -m src.finetune_vibevoice_lora `
 --voice_prompt_drop_rate 0.2 `
 --lr_scheduler_type cosine `
 --warmup_ratio 0.03 `
---max_grad_norm 0.8 `
---optim paged_adamw_8bit `
---quantization_mode 8bit
+--max_grad_norm 0.8
 ```
 
 ### JSONL format:
