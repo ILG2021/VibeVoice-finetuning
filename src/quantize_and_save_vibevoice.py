@@ -294,9 +294,9 @@ def main():
     parser = argparse.ArgumentParser(description="Quantize and save VibeVoice model")
     parser.add_argument("--model_path", default="ckpts/merge",
                        help="Path to the original model")
-    parser.add_argument("--output_dir", default="ckpts/merge-8bit",
+    parser.add_argument("--output_dir", default="ckpts/merge-4bit",
                        help="Output directory for quantized model")
-    parser.add_argument("--bits", type=int, default=8, choices=[4, 8],
+    parser.add_argument("--bits", type=int, default=4, choices=[4, 8],
                        help="Quantization bits (4 or 8)")
     parser.add_argument("--quant_type", default="nf4", choices=["nf4", "fp4"],
                        help="4-bit quantization type")
@@ -307,7 +307,7 @@ def main():
     
     # Update output dir based on bits
     if str(args.bits) not in args.output_dir:
-        args.output_dir = args.output_dir.replace("8bit", f"{args.bits}bit")
+        args.output_dir = args.output_dir.replace("4bit", f"{args.bits}bit")
     
     # Quantize and save
     output_path = quantize_and_save_model(

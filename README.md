@@ -77,10 +77,10 @@ python -m src.finetune_vibevoice_lora \
 --text_column_name text \
 --audio_column_name audio \
 --output_dir ckpts \
---per_device_train_batch_size 1 \
+--per_device_train_batch_size 2 \
 --gradient_accumulation_steps 64 \
 --learning_rate 2.5e-5 \
---num_train_epochs 10 \
+--num_train_epochs 5 \
 --logging_steps 10 \
 --save_steps 200 \
 --save_total_limit 10 \
@@ -97,7 +97,7 @@ python -m src.finetune_vibevoice_lora \
 --lr_scheduler_type cosine \
 --warmup_ratio 0.03 \
 --max_grad_norm 0.8 \
---optim paged_adamw_8bit \
+--optim adamw_8bit \
 --quantization_mode 8bit
 ```
 
@@ -113,7 +113,7 @@ python -m src.finetune_vibevoice_lora `
 --per_device_train_batch_size 4 `
 --gradient_accumulation_steps 32 `
 --learning_rate 2.5e-5 `
---num_train_epochs 10 `
+--num_train_epochs 5 `
 --logging_steps 10 `
 --save_steps 200 `
 --save_total_limit 10 `
