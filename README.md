@@ -110,8 +110,8 @@ python -m src.finetune_vibevoice_lora `
 --text_column_name text `
 --audio_column_name audio `
 --output_dir ckpts `
---per_device_train_batch_size 1 `
---gradient_accumulation_steps 64 `
+--per_device_train_batch_size 4 `
+--gradient_accumulation_steps 32 `
 --learning_rate 2.5e-5 `
 --num_train_epochs 10 `
 --logging_steps 10 `
