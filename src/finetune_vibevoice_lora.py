@@ -1,94 +1,134 @@
 # train_vibevoice_lora.py
 import json
 import logging
+import math
 import os
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from math import ceil
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import huggingface_hub
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from datasets import load_dataset, VerificationMode
-from peft import LoraConfig, get_peft_model, TaskType, PeftModel
+from datasets import load_dataset, DatasetDict, VerificationMode
 from safetensors.torch import load_file
-from torch_ema import ExponentialMovingAverage
+
 from transformers import (
     HfArgumentParser,
     Trainer,
-    set_seed, BitsAndBytesConfig, AutoModel
+    set_seed,
+    TrainerCallback, BitsAndBytesConfig, TrainerState, AutoModel
 )
 from transformers import TrainingArguments as HfTrainingArguments
 
-from data_vibevoice import VibeVoiceDataset, VibeVoiceCollator
+from peft import LoraConfig, get_peft_model, TaskType
+
 from vibevoice.modular.modeling_vibevoice import VibeVoiceForConditionalGeneration
+from vibevoice.modular.configuration_vibevoice import VibeVoiceConfig
 from vibevoice.processor.vibevoice_processor import VibeVoiceProcessor
+
+from data_vibevoice import VibeVoiceDataset, VibeVoiceCollator
 
 logger = logging.getLogger(__name__)
 
 # ================== SAMPLE CALLBACK UTILS ==================
 
+import copy
 import torch
 from transformers import TrainerCallback
 
 
 class EmaCallback(TrainerCallback):
-    def __init__(self, attr_path="model.prediction_head", decay=0.999):
+    def __init__(self, attr_path="model.prediction_head", decay=0.999, device="cpu", resume_shadow=None):
+        """
+        Args:
+            resume_shadow: 从 checkpoint 恢复的 EMA shadow dict
+        """
         self.attr_path = attr_path
-        self.decay = decay
-        self.ema = None
-        self._model_state_dict_bk = None
+        self.decay = float(decay)
+        self.device = torch.device(device)
+        self.shadow = resume_shadow  # 允许外部注入
+        self._orig = None
 
-    def _get_target_module(self, model: nn.Module) -> nn.Module:
-        # 这个辅助函数依然有用
-        base_model = model.get_base_model() if isinstance(model, PeftModel) else model
-        target = base_model
+    def _get_module(self, model):
+        # Resolve dotted path like "model.prediction_head"
+        mod = model
         for name in self.attr_path.split('.'):
-            target = getattr(target, name)
-        return target
+            mod = getattr(mod, name)
+        return mod
 
     def on_train_begin(self, args, state, control, model=None, **kwargs):
-        head = self._get_target_module(model)
-        # 初始化EMA，它会自动处理设备问题
-        self.ema = ExponentialMovingAverage(head.parameters(), decay=self.decay)
-        logger.info(f"EMA enabled for '{self.attr_path}' with decay={self.decay}.")
-        # 如果从checkpoint恢复，需要加载EMA的状态
-        ema_path = os.path.join(args.resume_from_checkpoint, "ema.pt") if args.resume_from_checkpoint else None
-        if ema_path and os.path.exists(ema_path):
-            self.ema.load_state_dict(torch.load(ema_path))
-            logger.info("Loaded EMA state from checkpoint.")
+        head = self._get_module(model)
+
+        if self.shadow is None:
+            # 初始化新的 shadow
+            self.shadow = {k: p.detach().to(self.device).clone()
+                           for k, p in head.state_dict().items()}
+            logger.info("EMA: Initialized new shadow weights")
+        else:
+            # Resume: 验证 keys 匹配
+            current_keys = set(head.state_dict().keys())
+            shadow_keys = set(self.shadow.keys())
+            if current_keys != shadow_keys:
+                logger.warning(f"EMA: Key mismatch! current={len(current_keys)}, shadow={len(shadow_keys)}")
+                # 可以选择重新初始化或只保留匹配的 keys
+                self.shadow = {k: v for k, v in self.shadow.items() if k in current_keys}
+            logger.info("EMA: Resumed from checkpoint shadow weights")
 
     def on_step_end(self, args, state, control, model=None, **kwargs):
-        # 更新EMA，只需一行！
-        if self.ema:
-            self.ema.update()
+        if self.shadow is None:
+            return
+        head = self._get_module(model)
+        with torch.no_grad():
+            for k, v in head.state_dict().items():
+                if k in self.shadow:
+                    self.shadow[k].mul_(self.decay).add_(v.detach().to(self.device), alpha=(1.0 - self.decay))
+
+    # ---- Swap helpers ----
+    def _swap_in_ema(self, model):
+        if self.shadow is None:
+            return
+        head = self._get_module(model)
+        self._orig = {k: v.cpu().clone() for k, v in head.state_dict().items()}
+        head.load_state_dict(self.shadow, strict=False)
+
+    def _swap_back(self, model):
+        if self._orig is None:
+            return
+        head = self._get_module(model)
+        head.load_state_dict(self._orig, strict=False)
+        self._orig = None
 
     def on_evaluate(self, args, state, control, model=None, **kwargs):
-        # 应用EMA权重进行评估
-        if self.ema:
-            self._model_state_dict_bk = self._get_target_module(model).state_dict()
-            self.ema.copy_to()
+        # use EMA during eval
+        self._swap_in_ema(model)
 
     def on_evaluate_end(self, args, state, control, model=None, **kwargs):
-        # 恢复原始模型权重
-        if self.ema and self._model_state_dict_bk:
-            self._get_target_module(model).load_state_dict(self._model_state_dict_bk)
-            self._model_state_dict_bk = None
+        self._swap_back(model)
 
     def on_save(self, args, state, control, model=None, **kwargs):
-        # 在保存模型时，也保存EMA的状态
-        if self.ema:
-            # 同样，先应用EMA权重，让Trainer保存的是EMA后的模型
-            self._model_state_dict_bk = self._get_target_module(model).state_dict()
-            self.ema.copy_to()
-            # 保存EMA自身的内部状态（shadow weights）
-            torch.save(self.ema.state_dict(), os.path.join(args.output_dir, "ema.pt"))
+        # temporarily swap to EMA, let Trainer save, then swap back
+        self._swap_in_ema(model)
+        # 保存 EMA shadow
+        try:
+            if self.shadow:
+                output_dir = getattr(args, "output_dir", None)
+                if output_dir:
+                    lora_out = os.path.join(output_dir, "lora")
+                    os.makedirs(lora_out, exist_ok=True)
+                    torch.save(self.shadow, os.path.join(lora_out, "ema_shadow.pt"))
+        except Exception as e:
+            logger.warning(f"Failed to save EMA shadow: {e}")
 
     def on_save_end(self, args, state, control, model=None, **kwargs):
-        # 保存结束后，恢复原始模型权重
-        if self.ema and self._model_state_dict_bk:
-            self._get_target_module(model).load_state_dict(self._model_state_dict_bk)
-            self._model_state_dict_bk = None
+        self._swap_back(model)
+
+    def on_train_end(self, args, state, control, model=None, **kwargs):
+        # final checkpoint: persist EMA
+        self._swap_in_ema(model)
 
 
 @dataclass
@@ -195,8 +235,8 @@ def mask_for_ce(labels: torch.Tensor, attention_mask: torch.Tensor, acoustic_inp
                 pad_id: int = -100) -> torch.Tensor:
     shifted = labels[:, 1:].contiguous()
     base_mask = attention_mask[:, 1:].contiguous().eq(1) if (
-            attention_mask is not None and attention_mask.numel() > 0) else torch.ones_like(shifted,
-                                                                                            dtype=torch.bool)
+                attention_mask is not None and attention_mask.numel() > 0) else torch.ones_like(shifted,
+                                                                                                dtype=torch.bool)
     label_is_acoustic = acoustic_input_mask[:, 1:].contiguous()
     final_mask = base_mask & (~label_is_acoustic)
     out = shifted.clone()
@@ -357,6 +397,18 @@ def load_lora_checkpoint(model, checkpoint_path: str, model_args: ModelArguments
     else:
         logger.info("  ℹ️ No semantic_connector checkpoint found")
 
+    # 5. 返回 EMA shadow (如果存在)
+    ema_path = os.path.join(lora_dir, "ema_shadow.pt")
+    ema_shadow = None
+    if os.path.exists(ema_path):
+        try:
+            ema_shadow = torch.load(ema_path, map_location="cpu")
+            logger.info("  ✓ Found EMA shadow weights")
+        except Exception as e:
+            logger.warning(f"  ⚠️ Failed to load EMA shadow: {e}")
+
+    return ema_shadow
+
 
 # 这段代码是一个动态修补函数，用于确保 acoustic_tokenizer.encode() 方法的返回值符合 [[...]] 格式，以支持遗留代码的兼容性。
 # 它通过检查返回值的类型（列表、字典、对象、Tensor 等）并进行格式转换，实现了健壮的适配逻辑。代码设计考虑了多种情况，
@@ -396,7 +448,6 @@ def _patch_acoustic_encode_for_legacy_indexing(model_obj, logger_):
         logger_.info("Patched acoustic_tokenizer.encode() to return [[...]] for legacy indexing.")
     except Exception as e:
         logger_.warning(f"Failed to patch acoustic_tokenizer.encode(): {e}")
-
 
 def quantize_language_model_only(
         model_path: str,
@@ -598,7 +649,6 @@ def main() -> None:
             model_args.model_name_or_path,
             torch_dtype=dtype
         )
-
     _patch_acoustic_encode_for_legacy_indexing(model, logger)
     processor.semantic_tokenizer = getattr(model.model, "semantic_tokenizer", None)
 
@@ -707,6 +757,7 @@ def main() -> None:
             p.requires_grad = False
 
     # ============ Resume or Fresh Training ============
+    ema_shadow = None
 
     if last_checkpoint:
         # 从 checkpoint 恢复
@@ -715,7 +766,7 @@ def main() -> None:
         logger.info("=" * 60)
 
         # 加载 LoRA checkpoint (会修改 model)
-        load_lora_checkpoint(model, last_checkpoint, model_args)
+        ema_shadow = load_lora_checkpoint(model, last_checkpoint, model_args)
 
         logger.info("=" * 60)
 
@@ -747,7 +798,6 @@ def main() -> None:
                     self.base = base
 
                 def forward(self, *args, **kwargs):
-
                     if len(args) >= 3:
                         noisy_images, timesteps, condition = args[:3]
                     else:
@@ -1029,7 +1079,7 @@ def main() -> None:
                 num_tok_loss = int(al_mask.sum().item()) if al_mask is not None else 0
                 num_lat_total = int(sp_masks.sum().item()) if sp_masks is not None else 0
                 num_lat_loss = int(((sp_loss_sel & sp_masks).sum().item())) if (
-                        sp_loss_sel is not None and sp_masks is not None) else 0
+                            sp_loss_sel is not None and sp_masks is not None) else 0
                 self.log({
                     "debug/num_tok_total": float(num_tok_total),
                     "debug/num_tok_loss": float(num_tok_loss),
@@ -1080,7 +1130,6 @@ def main() -> None:
                 pass
 
             return (total, outputs) if return_outputs else total
-
         # 手动加载checkpoint
         def _load_from_checkpoint(self, resume_from_checkpoint, model=None):
             pass
@@ -1170,7 +1219,7 @@ def main() -> None:
 
     # Resolve which adapters to apply in samples
 
-    ema_cb = EmaCallback(attr_path="model.prediction_head", decay=0.999)
+    ema_cb = EmaCallback(attr_path="model.prediction_head", decay=0.999, device="cpu", resume_shadow=ema_shadow)
 
     trainer = VibeVoiceTrainer(
         model=model,
