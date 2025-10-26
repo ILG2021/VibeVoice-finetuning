@@ -91,7 +91,7 @@ python -m src.finetune_vibevoice_lora \
 --gradient_clipping \
 --ddpm_batch_mul 4 \
 --diffusion_loss_weight 1.4 \
---train_full_diffusion_head True \
+--train_diffusion_head True \
 --ce_loss_weight 0.04 \
 --voice_prompt_drop_rate 0.2 \
 --lr_scheduler_type cosine \
@@ -112,8 +112,8 @@ python -m src.finetune_vibevoice_lora `
 --output_dir ckpts `
 --per_device_train_batch_size 4 `
 --gradient_accumulation_steps 32 `
---learning_rate 2.5e-5 `
---num_train_epochs 5 `
+--learning_rate 5e-5 `
+--num_train_epochs 20 `
 --logging_steps 10 `
 --save_steps 200 `
 --save_total_limit 10 `
@@ -124,7 +124,7 @@ python -m src.finetune_vibevoice_lora `
 --gradient_clipping `
 --ddpm_batch_mul 4 `
 --diffusion_loss_weight 1.4 `
---train_full_diffusion_head True `
+--train_diffusion_head True `
 --ce_loss_weight 0.04 `
 --voice_prompt_drop_rate 0.2 `
 --lr_scheduler_type cosine `
