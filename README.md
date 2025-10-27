@@ -80,7 +80,7 @@ python -m src.finetune_vibevoice_lora \
 --per_device_train_batch_size 2 \
 --gradient_accumulation_steps 64 \
 --learning_rate 2.5e-5 \
---num_train_epochs 5 \
+--num_train_epochs 10 \
 --logging_steps 10 \
 --save_steps 200 \
 --save_total_limit 10 \
@@ -97,8 +97,8 @@ python -m src.finetune_vibevoice_lora \
 --lr_scheduler_type cosine \
 --warmup_ratio 0.03 \
 --max_grad_norm 0.8 \
---optim adamw_8bit \
---quantization_mode 8bit
+--llm_use_8bit True \
+--optim adamw_8bit
 ```
 
 For Windows
