@@ -6,6 +6,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+import huggingface_hub
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -402,7 +403,7 @@ def main() -> None:
             load_in_8bit=True,
             bnb_8bit_compute_dtype=torch.bfloat16,
         )
-        model = quantize_language_model_only(model_args.model_name_or_path, bnb_config, torch_dtype=dtype)
+        model = quantize_language_model_only(huggingface_hub.snapshot_download(model_args.model_name_or_path), bnb_config, torch_dtype=dtype)
     else:
         model = VibeVoiceForConditionalGeneration.from_pretrained(
             model_args.model_name_or_path,
