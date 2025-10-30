@@ -201,8 +201,8 @@ def mask_for_ce(labels: torch.Tensor, attention_mask: torch.Tensor, acoustic_inp
                 pad_id: int = -100) -> torch.Tensor:
     shifted = labels[:, 1:].contiguous()
     base_mask = attention_mask[:, 1:].contiguous().eq(1) if (
-                attention_mask is not None and attention_mask.numel() > 0) else torch.ones_like(shifted,
-                                                                                                dtype=torch.bool)
+            attention_mask is not None and attention_mask.numel() > 0) else torch.ones_like(shifted,
+                                                                                            dtype=torch.bool)
     label_is_acoustic = acoustic_input_mask[:, 1:].contiguous()
     final_mask = base_mask & (~label_is_acoustic)
     out = shifted.clone()
@@ -245,6 +245,7 @@ def _patch_acoustic_encode_for_legacy_indexing(model_obj, logger_):
         logger_.info("Patched acoustic_tokenizer.encode() to return [[...]] for legacy indexing.")
     except Exception as e:
         logger_.warning(f"Failed to patch acoustic_tokenizer.encode(): {e}")
+
 
 def quantize_language_model_only(
         model_path: str,
@@ -354,6 +355,7 @@ def quantize_language_model_only(
 
     return full_model
 
+
 def main() -> None:
     parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
@@ -403,7 +405,8 @@ def main() -> None:
             load_in_8bit=True,
             bnb_8bit_compute_dtype=torch.bfloat16,
         )
-        model = quantize_language_model_only(huggingface_hub.snapshot_download(model_args.model_name_or_path), bnb_config, torch_dtype=dtype)
+        model = quantize_language_model_only(huggingface_hub.snapshot_download(model_args.model_name_or_path),
+                                             bnb_config, torch_dtype=dtype)
     else:
         model = VibeVoiceForConditionalGeneration.from_pretrained(
             model_args.model_name_or_path,
@@ -545,7 +548,8 @@ def main() -> None:
     if getattr(model_args, "lora_wrap_diffusion_head", False) and hasattr(model.model, "prediction_head"):
         class _HeadForwardShim(nn.Module):
             def __init__(self, base: nn.Module):
-                super().__init__(); self.base = base
+                super().__init__();
+                self.base = base
 
             def forward(self, *args, **kwargs):
                 if len(args) >= 3:
@@ -808,7 +812,7 @@ def main() -> None:
                 num_tok_loss = int(al_mask.sum().item()) if al_mask is not None else 0
                 num_lat_total = int(sp_masks.sum().item()) if sp_masks is not None else 0
                 num_lat_loss = int(((sp_loss_sel & sp_masks).sum().item())) if (
-                            sp_loss_sel is not None and sp_masks is not None) else 0
+                        sp_loss_sel is not None and sp_masks is not None) else 0
                 self.log({
                     "debug/num_tok_total": float(num_tok_total),
                     "debug/num_tok_loss": float(num_tok_loss),
@@ -951,8 +955,9 @@ def main() -> None:
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
-        callbacks=[ema_cb,
-                   LoRADebugCallback(log_every_n_steps=(int(getattr(training_args, "logging_steps", 50) or 50)))],
+        callbacks=[
+            # ema_cb,
+            LoRADebugCallback(log_every_n_steps=(int(getattr(training_args, "logging_steps", 50) or 50)))],
     )
 
     # Optional debug pre-training save

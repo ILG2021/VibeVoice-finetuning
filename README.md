@@ -114,10 +114,10 @@ python -m src.finetune_vibevoice_lora `
 --output_dir outputTrain3 `
 --per_device_train_batch_size 4 `
 --gradient_accumulation_steps 32 `
---learning_rate 5e-5 `
---num_train_epochs 10 `
+--learning_rate 2.5e-5 `
+--num_train_epochs 5 `
 --logging_steps 10 `
---save_steps 200 `
+--save_steps 100 `
 --save_total_limit 10 `
 --report_to tensorboard `
 --remove_unused_columns False `
@@ -129,7 +129,7 @@ python -m src.finetune_vibevoice_lora `
 --diffusion_loss_weight 1.4 `
 --train_diffusion_head True `
 --ce_loss_weight 0.04 `
---voice_prompt_drop_rate 0.2 `
+--voice_prompt_drop_rate 1.0 `
 --lora_target_modules q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj `
 --lr_scheduler_type cosine `
 --warmup_ratio 0.03 `
